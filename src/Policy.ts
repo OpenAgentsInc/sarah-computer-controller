@@ -51,7 +51,18 @@ const allow = (needsConfirmation: boolean): Decision => ({ _tag: "Allowed", need
  * an empty list means the bare command only.
  */
 export const curatedAllowlist: Record<string, ReadonlyArray<string>> = {
-  git: ["status", "log", "diff", "branch", "remote", "show", "rev-parse", "ls-files"],
+  git: ["status", "log", "diff", "branch", "remote", "show", "rev-parse", "ls-files", "--version"],
+  uname: [],
+  date: [],
+  echo: [],
+  whoami: [],
+  df: [],
+  du: [],
+  ps: [],
+  uptime: [],
+  env: [],
+  file: [],
+  stat: [],
   ls: [],
   cat: [],
   head: [],
