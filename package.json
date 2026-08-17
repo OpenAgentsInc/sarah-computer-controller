@@ -38,7 +38,8 @@
     "coverage": "vitest run --coverage",
     "copy-package-json": "tsx scripts/copy-package-json.ts",
     "changeset-version": "changeset version",
-    "changeset-publish": "pnpm build && changeset publish"
+    "changeset-publish": "pnpm build && changeset publish",
+    "ci": "pnpm check && pnpm lint && pnpm test && pnpm build"
   },
   "dependencies": {
     "@effect/platform-node": "4.0.0-rc.110",
