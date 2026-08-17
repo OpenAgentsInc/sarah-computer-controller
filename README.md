@@ -96,7 +96,7 @@ pnpm check   # typecheck
 pnpm lint    # lint
 pnpm test    # tests
 pnpm build   # bundle to dist/
-pnpm ci      # all of the above
+pnpm run ci  # all of the above
 ```
 
 There is no hosted CI: checks run locally, manually or via the standard git hooks in

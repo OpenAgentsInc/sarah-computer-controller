@@ -1,6 +1,6 @@
 #!/bin/sh
 # Local CI. This repository has no hosted CI by policy: checks run here, or
-# manually via `pnpm ci`.
+# manually via `pnpm run ci`.
 set -e
 pnpm check
 pnpm lint

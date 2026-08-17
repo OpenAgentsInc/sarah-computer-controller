@@ -15,6 +15,7 @@ export interface ControllerConfig {
   readonly roots: ReadonlyArray<string>
   readonly preApproved: ReadonlyArray<string>
   readonly machineName: string
+  readonly machineId: string
 }
 
 export const defaultEndpoint = "https://stage.openagents.com"
@@ -40,7 +41,8 @@ export const defaultConfig = (): ControllerConfig => ({
   tier: "probe",
   roots: [],
   preApproved: [],
-  machineName: os.hostname()
+  machineName: os.hostname(),
+  machineId: ""
 })
 
 const isTier = (value: unknown): value is Tier => value === "probe" || value === "curated" || value === "shell"
@@ -64,7 +66,8 @@ export const readConfig = (): ControllerConfig => {
     tier: isTier(record["tier"]) ? record["tier"] : fallback.tier,
     roots: stringArray(record["roots"]),
     preApproved: stringArray(record["preApproved"]),
-    machineName: typeof record["machineName"] === "string" ? record["machineName"] : fallback.machineName
+    machineName: typeof record["machineName"] === "string" ? record["machineName"] : fallback.machineName,
+    machineId: typeof record["machineId"] === "string" ? record["machineId"] : fallback.machineId
   }
 }
 
@@ -74,6 +77,23 @@ export const writeConfig = (config: ControllerConfig): void => {
 }
 
 export const hasToken = (): boolean => fs.existsSync(tokenPath())
+
+/**
+ * The machine token lives in a `0600` file under the controller's own
+ * directory and is never printed, journalled, or passed as an argument.
+ */
+export const writeToken = (token: string): void => {
+  fs.mkdirSync(configDirectory(), { recursive: true, mode: 0o700 })
+  fs.writeFileSync(tokenPath(), token, { mode: 0o600 })
+}
+
+export const readToken = (): string | undefined => {
+  if (!hasToken()) {
+    return undefined
+  }
+  const token = fs.readFileSync(tokenPath(), "utf8").trim()
+  return token === "" ? undefined : token
+}
 
 export const removeToken = (): void => {
   if (hasToken()) {

@@ -1,10 +1,15 @@
 import { Console, Effect } from "effect"
 import { Command, Flag } from "effect/unstable/cli"
+import type { ChildProcessSpawner } from "effect/unstable/process"
 
+import * as Api from "./Api.js"
+import * as Channel from "./Channel.js"
 import * as Config from "./Config.js"
 import * as Journal from "./Journal.js"
 import * as Policy from "./Policy.js"
 import * as Probe from "./Probe.js"
+
+const version = "0.1.0"
 
 const rootFlag = Flag.string("root").pipe(
   Flag.withDescription("A directory Sarah may work inside. Repeatable."),
@@ -91,24 +96,101 @@ const pairCommand = Command.make(
   ({ allow, endpoint, root }) =>
     Effect.gen(function*() {
       const roots = effectiveRoots(root)
-      Config.writeConfig({ ...Config.readConfig(), endpoint, roots, tier: allow })
-      yield* Console.log(`Recorded endpoint ${endpoint}, tier ${allow}, roots ${roots.join(", ")}.`)
-      yield* Console.log(
-        "Device pairing against the Sarah API is not available yet — the pairing endpoint and machine channel ship with the next milestone. `probe` and `policy` work offline today."
-      )
+      const stored = Config.readConfig()
+      Config.writeConfig({ ...stored, endpoint, roots, tier: allow })
+
+      const start = yield* Api.startPairing({
+        endpoint,
+        name: stored.machineName,
+        tier: allow,
+        platform: `${process.platform}-${process.arch}`,
+        agentVersion: version,
+        roots
+      })
+
+      yield* Console.log(`Approve this machine at ${start.verifyUrl}`)
+      yield* Console.log(`Pairing code  ${start.code}`)
+      yield* Console.log("Waiting for approval…")
+
+      const claim = yield* awaitApproval(endpoint, start)
+      Config.writeToken(claim.token)
+      Config.writeConfig({ ...Config.readConfig(), machineId: claim.machineId })
+      yield* Console.log(`Paired as "${claim.name}". Run \`sarah-computer-controller up\` to connect.`)
     })
 ).pipe(Command.withDescription("Record endpoint, tier, and roots, then pair this machine with Sarah"))
 
-const upCommand = Command.make("up", { endpoint: endpointFlag }, ({ endpoint }) =>
+const awaitApproval = (
+  endpoint: string,
+  start: Api.PairingStart
+): Effect.Effect<Api.PairingClaim, Api.ApiError> =>
   Effect.gen(function*() {
-    if (!Config.hasToken()) {
-      yield* Console.log("This machine is not paired. Run `sarah-computer-controller pair` first.")
-      return
+    const outcome = yield* Api.pollPairing(endpoint, start.pairingId, start.pollSecret)
+    if (outcome._tag === "Approved") {
+      return outcome.claim
     }
-    yield* Console.log(
-      `Connecting to ${endpoint} is not available yet — the machine channel ships with the next milestone.`
-    )
-  })).pipe(Command.withDescription("Connect to Sarah and serve bounded requests"))
+    if (outcome._tag === "Expired") {
+      return yield* Effect.fail(new Api.ApiError({ reason: "pairing_expired" }))
+    }
+    yield* Effect.sleep(`${start.intervalSeconds} seconds`)
+    return yield* awaitApproval(endpoint, start)
+  })
+
+const upCommand = Command.make(
+  "up",
+  { endpoint: endpointFlag, root: rootFlag },
+  ({ endpoint, root }) =>
+    Effect.gen(function*() {
+      const stored = Config.readConfig()
+      const token = Config.readToken()
+      if (token === undefined || stored.machineId === "") {
+        yield* Console.log("This machine is not paired. Run `sarah-computer-controller pair` first.")
+        return
+      }
+      const roots = effectiveRoots(root)
+      const target = endpoint === Config.defaultEndpoint ? stored.endpoint : endpoint
+      const services = yield* Effect.context<ChildProcessSpawner.ChildProcessSpawner>()
+      const initial = yield* Probe.probe(roots)
+
+      yield* Console.log(`Connecting to ${target} as "${stored.machineName}" (tier ${stored.tier}).`)
+
+      const reason = yield* Effect.promise(() =>
+        Channel.serve(
+          {
+            endpoint: target,
+            token,
+            machineId: stored.machineId,
+            hello: {
+              agent_version: version,
+              tier: stored.tier,
+              roots,
+              probe: Probe.wireReport(initial)
+            }
+          },
+          {
+            onJoined: () => console.log("Connected. Serving read-only discovery requests."),
+            onEvent: (message) => console.log(message),
+            onProbe: (requestId) =>
+              Effect.runPromiseWith(services)(
+                Probe.probe(roots).pipe(
+                  Effect.map((report) => {
+                    Journal.append({
+                      requestId,
+                      argv: ["probe"],
+                      cwd: roots[0] ?? process.cwd(),
+                      outcome: "answered",
+                      detail: "read-only discovery"
+                    })
+                    return Probe.wireReport(report)
+                  })
+                )
+              )
+          }
+        )
+      )
+
+      yield* Console.log(`Disconnected (${reason}).`)
+    })
+).pipe(Command.withDescription("Connect to Sarah and serve bounded requests"))
 
 const logoutCommand = Command.make("logout", {}, () =>
   Effect.gen(function*() {
@@ -131,6 +213,4 @@ const controller = Command.make("sarah-computer-controller").pipe(
   ])
 )
 
-export const run = Command.run(controller, {
-  version: "0.0.0"
-})
+export const run = Command.run(controller, { version })

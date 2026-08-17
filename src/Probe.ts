@@ -129,6 +129,22 @@ export const probe = (
     }
   })
 
+/** Wire shape for `sarah.computer.v1` — what the server stores and shows Sarah. */
+export const wireReport = (report: ProbeReport): Record<string, unknown> => ({
+  schema: report.schema,
+  platform: report.host.platform,
+  release: report.host.release,
+  architecture: report.host.architecture,
+  hostname: report.host.hostname,
+  shell: report.host.shell,
+  cpu_count: report.host.cpuCount,
+  total_memory_bytes: report.host.totalMemoryBytes,
+  uptime_seconds: report.host.uptimeSeconds,
+  coding_agents: report.codingAgents,
+  toolchains: report.toolchains,
+  roots: report.roots
+})
+
 const formatTool = (tool: ToolReport): string =>
   tool.present ? `  ${tool.name.padEnd(14)} ${tool.version || "present"}` : `  ${tool.name.padEnd(14)} —`
 
