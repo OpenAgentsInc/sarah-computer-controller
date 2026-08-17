@@ -1,3 +1,5 @@
+import * as path from "node:path"
+
 import { Console, Effect } from "effect"
 import { Command, Flag } from "effect/unstable/cli"
 import type { ChildProcessSpawner } from "effect/unstable/process"
@@ -5,6 +7,8 @@ import type { ChildProcessSpawner } from "effect/unstable/process"
 import * as Api from "./Api.js"
 import * as Channel from "./Channel.js"
 import * as Config from "./Config.js"
+import * as DevinAcp from "./DevinAcp.js"
+import * as Executor from "./Executor.js"
 import * as Journal from "./Journal.js"
 import * as Policy from "./Policy.js"
 import * as Probe from "./Probe.js"
@@ -135,6 +139,38 @@ const awaitApproval = (
     return yield* awaitApproval(endpoint, start)
   })
 
+const stringArray = (value: unknown): ReadonlyArray<string> | undefined =>
+  Array.isArray(value) && value.every((entry): entry is string => typeof entry === "string")
+    ? value
+    : undefined
+
+const boundedTimeout = (value: unknown, fallback: number, maximum: number): number =>
+  typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(Math.round(value), maximum) : fallback
+
+const resolveCwd = (value: unknown, roots: ReadonlyArray<string>): string => {
+  const fallback = roots[0] ?? process.cwd()
+  if (typeof value !== "string" || value.trim() === "") {
+    return fallback
+  }
+  const absolute = path.resolve(value)
+  return roots.some((root) => Policy.withinRoot(absolute, root)) ? absolute : fallback
+}
+
+/**
+ * Which ACP permission requests the local tier grants. `shell` allows any
+ * tool Devin proposes; `curated` allows only read-shaped tools; `probe`
+ * (and anything unrecognized) is refused. Never maps to an "always" grant.
+ */
+export const devinPermissionAllowed = (tier: Policy.Tier, kind: string): boolean => {
+  if (tier === "shell") {
+    return true
+  }
+  if (tier === "curated") {
+    return ["read", "search", "fetch", "think"].includes(kind)
+  }
+  return false
+}
+
 const upCommand = Command.make(
   "up",
   { endpoint: endpointFlag, root: rootFlag },
@@ -150,6 +186,118 @@ const upCommand = Command.make(
       const target = endpoint === Config.defaultEndpoint ? stored.endpoint : endpoint
       const services = yield* Effect.context<ChildProcessSpawner.ChildProcessSpawner>()
       const initial = yield* Probe.probe(roots)
+      const policyConfig: Policy.PolicyConfig = {
+        tier: stored.tier,
+        roots,
+        preApproved: stored.preApproved
+      }
+      const devinPath = initial.codingAgents.find((agent) => agent.name === "devin" && agent.present)?.path ?? ""
+
+      /** Cancel handles for every in-flight run/devin request, by request id. */
+      const active = new Map<string, () => void>()
+
+      const handleRun = (requestId: string, payload: Record<string, unknown>, respond: Channel.Responder): void => {
+        const argv = stringArray(payload["argv"])
+        if (argv === undefined || argv.length === 0) {
+          respond.refused("empty_command", "no command was supplied")
+          return
+        }
+        const cwd = resolveCwd(payload["cwd"], roots)
+        const decision = Policy.decide({ argv, cwd }, policyConfig)
+        if (decision._tag === "Refused") {
+          Journal.append({ requestId, argv, cwd, outcome: "refused", detail: decision.detail })
+          respond.refused(decision.reason, decision.detail)
+          return
+        }
+        const limits: Executor.ExecutionLimits = {
+          timeoutMillis: boundedTimeout(payload["timeout_ms"], 30_000, 120_000),
+          maximumOutputBytes: Executor.defaultLimits.maximumOutputBytes
+        }
+        const job = Executor.executeStreamed(argv, cwd, limits, respond.chunk)
+        active.set(requestId, job.cancel)
+        void job.done.then((outcome) => {
+          active.delete(requestId)
+          Journal.append({
+            requestId,
+            argv,
+            cwd,
+            outcome: outcome.cancelled ? "cancelled" : outcome.timedOut ? "timeout" : "ran",
+            detail: `exit ${outcome.exitCode} in ${outcome.durationMillis}ms`
+          })
+          respond.exit({
+            exit_code: outcome.exitCode,
+            status: outcome.cancelled ? "cancelled" : outcome.timedOut ? "timeout" : "completed",
+            timed_out: outcome.timedOut,
+            truncated: outcome.truncated,
+            duration_ms: outcome.durationMillis
+          })
+        })
+      }
+
+      const handleDevin = (requestId: string, payload: Record<string, unknown>, respond: Channel.Responder): void => {
+        const prompt = typeof payload["prompt"] === "string" ? payload["prompt"] : ""
+        if (prompt.trim() === "") {
+          respond.refused("empty_command", "no prompt was supplied")
+          return
+        }
+        if (stored.tier === "probe") {
+          Journal.append({
+            requestId,
+            argv: ["devin", "acp"],
+            cwd: roots[0] ?? process.cwd(),
+            outcome: "refused",
+            detail: "probe tier"
+          })
+          respond.refused("tier_insufficient", "this machine is paired at probe tier; only discovery is permitted")
+          return
+        }
+        if (devinPath === "") {
+          respond.exit({
+            status: "unavailable",
+            detail: "devin is not installed on this machine",
+            session_id: "",
+            duration_ms: 0,
+            truncated: false
+          })
+          return
+        }
+        const cwd = resolveCwd(payload["cwd"], roots)
+        const resumeSessionId = typeof payload["session_id"] === "string" && payload["session_id"] !== ""
+          ? payload["session_id"]
+          : undefined
+        const job = DevinAcp.start({
+          agentArgv: [devinPath, "acp"],
+          prompt,
+          cwd,
+          resumeSessionId,
+          env: process.env as Record<string, string>,
+          limits: {
+            ...DevinAcp.defaultDevinLimits,
+            timeoutMillis: boundedTimeout(payload["timeout_ms"], DevinAcp.defaultDevinLimits.timeoutMillis, 600_000)
+          },
+          onChunk: respond.chunk,
+          decidePermission: (query) => devinPermissionAllowed(stored.tier, query.kind)
+        })
+        active.set(requestId, job.cancel)
+        void job.done.then((outcome) => {
+          active.delete(requestId)
+          Journal.append({
+            requestId,
+            argv: ["devin", "acp"],
+            cwd,
+            outcome: outcome.status,
+            detail: outcome.detail !== "" ? outcome.detail : `stop reason ${outcome.stopReason || "none"}`
+          })
+          respond.exit({
+            status: outcome.status,
+            stop_reason: outcome.stopReason,
+            session_id: outcome.sessionId,
+            detail: outcome.detail,
+            truncated: outcome.truncated,
+            duration_ms: outcome.durationMillis
+          })
+        })
+      }
 
       yield* Console.log(`Connecting to ${target} as "${stored.machineName}" (tier ${stored.tier}).`)
 
@@ -167,7 +315,8 @@ const upCommand = Command.make(
             }
           },
           {
-            onJoined: () => console.log("Connected. Serving read-only discovery requests."),
+            onJoined: () =>
+              console.log(`Connected. Serving discovery, command, and Devin requests (tier ${stored.tier}).`),
             onEvent: (message) => console.log(message),
             onProbe: (requestId) =>
               Effect.runPromiseWith(services)(
@@ -183,7 +332,21 @@ const upCommand = Command.make(
                     return Probe.wireReport(report)
                   })
                 )
-              )
+              ),
+            onRun: handleRun,
+            onDevin: handleDevin,
+            onCancel: (requestId) => {
+              const cancel = active.get(requestId)
+              if (cancel !== undefined) {
+                cancel()
+              }
+            },
+            onClosed: () => {
+              for (const cancel of active.values()) {
+                cancel()
+              }
+              active.clear()
+            }
           }
         )
       )

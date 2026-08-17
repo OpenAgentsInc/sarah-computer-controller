@@ -11,8 +11,19 @@ import WebSocket from "ws"
 /** Phoenix's v2 serializer frame: [join_ref, ref, topic, event, payload]. */
 type Frame = [string | null, string | null, string, string, unknown]
 
+/** Push-side of one in-flight request: streamed chunks and one terminal event. */
+export interface Responder {
+  readonly chunk: (text: string) => void
+  readonly exit: (payload: Record<string, unknown>) => void
+  readonly refused: (reason: string, detail: string) => void
+}
+
 export interface ChannelHandlers {
   readonly onProbe: (requestId: string) => Promise<unknown>
+  readonly onRun: (requestId: string, payload: Record<string, unknown>, respond: Responder) => void
+  readonly onDevin: (requestId: string, payload: Record<string, unknown>, respond: Responder) => void
+  readonly onCancel: (requestId: string) => void
+  readonly onClosed: () => void
   readonly onJoined: () => void
   readonly onEvent: (message: string) => void
 }
@@ -62,7 +73,13 @@ export const serve = (options: ChannelOptions, handlers: ChannelHandlers): Promi
       socket.send(JSON.stringify(frame))
     }
 
+    let finished = false
     const finish = (reason: string): void => {
+      if (finished) {
+        return
+      }
+      finished = true
+      handlers.onClosed()
       if (heartbeat !== undefined) {
         clearInterval(heartbeat)
         heartbeat = undefined
@@ -72,6 +89,12 @@ export const serve = (options: ChannelOptions, handlers: ChannelHandlers): Promi
       }
       resolve(reason)
     }
+
+    const responder = (requestId: string): Responder => ({
+      chunk: (t) => push(topic, "chunk", { request_id: requestId, text: t }, true),
+      exit: (body) => push(topic, "exit", { request_id: requestId, ...body }, true),
+      refused: (reason, detail) => push(topic, "refused", { request_id: requestId, reason, detail }, true)
+    })
 
     socket.on("open", () => {
       socket.send(JSON.stringify([joinRef, joinRef, topic, "phx_join", {}]))
@@ -115,16 +138,36 @@ export const serve = (options: ChannelOptions, handlers: ChannelHandlers): Promi
         return
       }
 
+      const body = record(payload)
+      const requestId = body["request_id"]
+      if (typeof requestId !== "string") {
+        return
+      }
+
       if (event === "probe") {
-        const requestId = record(payload)["request_id"]
-        if (typeof requestId !== "string") {
-          return
-        }
         handlers.onEvent(`probe requested (${requestId.slice(0, 8)})`)
         handlers.onProbe(requestId).then(
           (report) => push(topic, "probe_result", { request_id: requestId, probe: report }, true),
           () => push(topic, "probe_refused", { request_id: requestId }, true)
         )
+        return
+      }
+
+      if (event === "run") {
+        handlers.onEvent(`command requested (${requestId.slice(0, 8)})`)
+        handlers.onRun(requestId, body, responder(requestId))
+        return
+      }
+
+      if (event === "devin") {
+        handlers.onEvent(`devin delegation requested (${requestId.slice(0, 8)})`)
+        handlers.onDevin(requestId, body, responder(requestId))
+        return
+      }
+
+      if (event === "cancel") {
+        handlers.onEvent(`cancel requested (${requestId.slice(0, 8)})`)
+        handlers.onCancel(requestId)
       }
     })
 

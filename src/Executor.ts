@@ -3,6 +3,8 @@
  * so the limits in this module are the limits of what she can do to a machine.
  */
 
+import { spawn as nodeSpawn } from "node:child_process"
+
 import { Effect, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import type { ChildProcessSpawner } from "effect/unstable/process"
@@ -146,6 +148,123 @@ export const execute = (
       durationMillis: Date.now() - startedAt
     }
   })
+
+export interface StreamedOutcome {
+  readonly argv: ReadonlyArray<string>
+  readonly cwd: string
+  readonly exitCode: number
+  readonly truncated: boolean
+  readonly timedOut: boolean
+  readonly cancelled: boolean
+  readonly durationMillis: number
+}
+
+export interface RunningExecution {
+  readonly done: Promise<StreamedOutcome>
+  readonly cancel: () => void
+}
+
+/**
+ * Run one command with argv only, streaming bounded, secret-scrubbed output
+ * chunks as they arrive instead of aggregating them. Used for the channel
+ * `run` path so Sarah sees progress while a command executes. The returned
+ * cancel handle kills the process; the promise always settles exactly once.
+ */
+export const executeStreamed = (
+  argv: ReadonlyArray<string>,
+  cwd: string,
+  limits: ExecutionLimits,
+  onChunk: (text: string) => void
+): RunningExecution => {
+  const startedAt = Date.now()
+  const [command, ...args] = argv
+  let settled = false
+  let cancelled = false
+  let timedOut = false
+  let outputBytes = 0
+  let truncated = false
+  let resolveDone: (outcome: StreamedOutcome) => void
+  const done = new Promise<StreamedOutcome>((resolve) => {
+    resolveDone = resolve
+  })
+
+  const finish = (exitCode: number): void => {
+    if (settled) {
+      return
+    }
+    settled = true
+    resolveDone({ argv, cwd, exitCode, truncated, timedOut, cancelled, durationMillis: Date.now() - startedAt })
+  }
+
+  if (command === undefined) {
+    setTimeout(() => finish(127), 0)
+    return { done, cancel: () => undefined }
+  }
+
+  const child = nodeSpawn(command, args, {
+    cwd,
+    env: scrubbedEnvironment(process.env),
+    shell: false,
+    stdio: ["ignore", "pipe", "pipe"]
+  })
+
+  const emit = (chunk: Buffer): void => {
+    if (outputBytes >= limits.maximumOutputBytes) {
+      truncated = true
+      return
+    }
+    const text = scrubSecrets(chunk.toString("utf8"))
+    const remaining = limits.maximumOutputBytes - outputBytes
+    const bounded = text.length > remaining ? text.slice(0, remaining) : text
+    truncated = truncated || bounded.length < text.length
+    outputBytes += bounded.length
+    if (bounded !== "") {
+      onChunk(bounded)
+    }
+  }
+
+  child.stdout.on("data", emit)
+  child.stderr.on("data", emit)
+
+  const kill = (): void => {
+    try {
+      child.kill("SIGTERM")
+      setTimeout(() => {
+        try {
+          child.kill("SIGKILL")
+        } catch {
+          // already gone
+        }
+      }, 3_000).unref()
+    } catch {
+      // already gone
+    }
+  }
+
+  const timeout = setTimeout(() => {
+    timedOut = true
+    kill()
+  }, limits.timeoutMillis)
+  timeout.unref()
+
+  child.on("error", () => {
+    clearTimeout(timeout)
+    finish(127)
+  })
+
+  child.on("close", (code) => {
+    clearTimeout(timeout)
+    finish(code ?? (timedOut || cancelled ? 124 : 1))
+  })
+
+  return {
+    done,
+    cancel: () => {
+      cancelled = true
+      kill()
+    }
+  }
+}
 
 /**
  * Run a command and return its trimmed first line, or `""` when it is absent or
