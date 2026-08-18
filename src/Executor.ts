@@ -36,9 +36,9 @@ export interface ExecutionOutcome {
  * withheld, so a leaked token in the controller's own environment does not
  * become readable by a command Sarah proposed.
  */
-const passthroughEnvironmentNames = ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SHELL", "USER", "TERM"]
+export const passthroughEnvironmentNames = ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SHELL", "USER", "TERM"]
 
-const scrubbedEnvironment = (source: Record<string, string | undefined>): Record<string, string> => {
+export const scrubbedEnvironment = (source: Record<string, string | undefined>): Record<string, string> => {
   const result: Record<string, string> = {}
   for (const name of passthroughEnvironmentNames) {
     const value = source[name]

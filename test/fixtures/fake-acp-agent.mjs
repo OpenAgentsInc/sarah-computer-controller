@@ -1,14 +1,18 @@
-// A minimal ACP v1 agent used by DevinAcp tests. Speaks newline-delimited
-// JSON-RPC on stdio, exactly like `devin acp`. Behavior is selected with a
-// single argv flag so tests can exercise each handshake state.
+// A minimal ACP v1 agent used by AcpAgent tests. Speaks newline-delimited
+// JSON-RPC on stdio, exactly like `devin acp` or `claude-agent-acp`.
+// Behavior is selected with a single argv flag so tests can exercise each
+// handshake state.
 //
 //   node fake-acp-agent.mjs                 happy path with streamed updates
 //   node fake-acp-agent.mjs --permission    asks permission before finishing
+//   node fake-acp-agent.mjs --permission-bypass  offers only bypass/reject permission options
 //   node fake-acp-agent.mjs --auth          requires authenticate before session/new
 //   node fake-acp-agent.mjs --auth-strict   authentication always fails
 //   node fake-acp-agent.mjs --slow          never completes the prompt (for cancel/timeout)
 //   node fake-acp-agent.mjs --refuse        prompt ends with stopReason "refusal"
 //   node fake-acp-agent.mjs --garbage       emits malformed lines between messages
+//   node fake-acp-agent.mjs --load          supports loadSession; resumes sessions
+//   node fake-acp-agent.mjs --oversize      streams one oversize update line before finishing
 
 import process from "node:process"
 import * as readline from "node:readline"
@@ -70,12 +74,22 @@ rl.on("line", (line) => {
     }
     reply(id, {
       protocolVersion: 1,
-      agentCapabilities: { loadSession: false },
+      agentCapabilities: { loadSession: mode === "--load" },
       agentInfo: { name: "fake-acp-agent", version: "1.0.0" },
       authMethods: mode === "--auth" || mode === "--auth-strict"
         ? [{ id: "fake-login", name: "Fake login", description: "test auth" }]
         : []
     })
+    return
+  }
+
+  if (method === "session/load") {
+    if (mode !== "--load") {
+      fail(id, -32601, "method not found: session/load")
+      return
+    }
+    streamText(params.sessionId, `resumed ${params.sessionId}. `)
+    reply(id, {})
     return
   }
 
@@ -108,7 +122,33 @@ rl.on("line", (line) => {
       reply(id, { stopReason: "refusal" })
       return
     }
+    if (mode === "--oversize") {
+      streamText(sessionId, "small before. ")
+      streamText(sessionId, `HUGE:${"x".repeat(64 * 1024)}`)
+      streamText(sessionId, "small after. ")
+      reply(id, { stopReason: "end_turn" })
+      return
+    }
     streamText(sessionId, "working on it… ")
+    if (mode === "--permission-bypass") {
+      request("session/request_permission", {
+        sessionId,
+        toolCall: { toolCallId: "call-2", title: "Run anything", kind: "execute", rawInput: {} },
+        options: [
+          { optionId: "bypass-permissions", name: "Always allow (bypassPermissions)", kind: "allow_always" },
+          { optionId: "reject-once", name: "Reject", kind: "reject_once" }
+        ]
+      }).then((result) => {
+        const outcome = result?.outcome
+        if (outcome?.outcome === "selected" && outcome.optionId === "bypass-permissions") {
+          streamText(sessionId, "BYPASSED! ")
+          reply(id, { stopReason: "end_turn" })
+        } else {
+          reply(id, { stopReason: "refusal" })
+        }
+      })
+      return
+    }
     if (mode === "--permission") {
       request("session/request_permission", {
         sessionId,
