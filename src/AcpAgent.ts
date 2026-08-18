@@ -253,30 +253,167 @@ export const selectPermissionOption = (
   return undefined
 }
 
-/** Extract human-readable progress text from one `session/update` payload. */
-export const updateText = (update: acp.SessionUpdate): string => {
+/**
+ * A rendered `session/update`: `stream` is what the live rail receives —
+ * structured tool frames plus prose — and `durable` is the clean readable
+ * copy accumulated into the delegation's persisted output. Splitting them
+ * keeps the rail rich while the durable record stays free of control bytes.
+ */
+export interface RenderedUpdate {
+  readonly stream: string
+  readonly durable: string
+}
+
+/**
+ * Frame delimiters for structured events carried inside the plain-text stream.
+ * A frame is one line that begins with RS (record separator) and splits its
+ * fields on US (unit separator); everything else in the stream is prose. The
+ * Sarah rail parses frames into collapsible tool cards; the delimiters are
+ * control bytes so they never collide with agent prose. Titles, commands, and
+ * output are base64 so their own newlines and separators survive intact.
+ */
+const RS = ""
+const US = ""
+
+const b64 = (value: string): string => Buffer.from(value, "utf8").toString("base64")
+
+/**
+ * One tool frame: `RS T US <id> US <phase> US <kind> US <b64 title> US <b64 detail>`.
+ * phase 0 = started (detail is the command), 1 = completed, 2 = failed
+ * (detail is a bounded output/error snippet). A note frame is
+ * `RS N US <b64 text> US <tone>`.
+ */
+const toolFrame = (
+  id: string,
+  phase: 0 | 1 | 2,
+  kind: string,
+  title: string,
+  detail: string
+): string => `${RS}T${US}${id}${US}${phase}${US}${kind}${US}${b64(title)}${US}${b64(detail)}\n`
+
+const noteFrame = (text: string, tone: "info" | "warn" | "error"): string => `${RS}N${US}${b64(text)}${US}${tone}\n`
+
+const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+  value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+
+const trimmed = (value: unknown): string | undefined => {
+  if (typeof value !== "string") {
+    return undefined
+  }
+  const out = value.trim()
+  return out === "" ? undefined : out
+}
+
+/** Join a command that may arrive as a string or an argv array. */
+const commandValue = (value: unknown): string | undefined => {
+  const direct = trimmed(value)
+  if (direct !== undefined) {
+    return direct
+  }
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+  const parts = value.map((entry) => trimmed(entry)).filter((part): part is string => part !== undefined)
+  return parts.length === 0 ? undefined : parts.join(" ")
+}
+
+/**
+ * Best-effort command extraction from a tool call's raw input or title, ported
+ * from t3code's tool-activity reader: prefer an explicit `command`, then an
+ * `executable`+`args` pair, then a backticked fragment in the title.
+ */
+const extractCommand = (rawInput: unknown, title: string): string | undefined => {
+  const raw = asRecord(rawInput)
+  const fromCommand = commandValue(raw?.["command"])
+  if (fromCommand !== undefined) {
+    return fromCommand
+  }
+  const executable = trimmed(raw?.["executable"])
+  const args = commandValue(raw?.["args"])
+  if (executable !== undefined) {
+    return args !== undefined ? `${executable} ${args}` : executable
+  }
+  const backtick = /`([^`]+)`/u.exec(title)
+  return trimmed(backtick?.[1])
+}
+
+/** Pull displayable text out of a tool call's content blocks. */
+const extractContentText = (content: unknown): string => {
+  if (!Array.isArray(content)) {
+    return ""
+  }
+  const parts: Array<string> = []
+  for (const entry of content) {
+    const record = asRecord(entry)
+    if (record === undefined) {
+      continue
+    }
+    const inner = asRecord(record["content"])
+    const text = trimmed(inner?.["text"]) ?? trimmed(record["text"]) ?? trimmed(record["content"])
+    if (text !== undefined) {
+      parts.push(text)
+    }
+  }
+  return parts.join("\n")
+}
+
+/** Strip a trailing `<exited with exit code N>` marker Claude Code appends. */
+const stripExitMarker = (value: string): string => value.replace(/\s*<exited with exit code \d+>\s*$/iu, "").trim()
+
+const maximumDetailChars = 1_400
+
+const boundedDetail = (value: string): string =>
+  value.length > maximumDetailChars ? `${value.slice(0, maximumDetailChars)}\n…` : value
+
+/**
+ * Render one `session/update` into a rail stream string (structured frames +
+ * prose) and a clean durable string. Every user-derived field is scrubbed of
+ * secrets here, before framing, so the base64 payloads the rail parses are
+ * already safe and the caller does not scrub again.
+ */
+export const renderUpdate = (update: acp.SessionUpdate): RenderedUpdate => {
   switch (update.sessionUpdate) {
-    case "agent_message_chunk":
-      return update.content.type === "text" ? update.content.text : ""
+    case "agent_message_chunk": {
+      const text = update.content.type === "text" ? scrubSecrets(update.content.text) : ""
+      return { stream: text, durable: text }
+    }
     case "agent_thought_chunk":
-      return ""
+      return { stream: "", durable: "" }
     case "tool_call": {
-      const title = update.title
-      return title === "" ? "" : `\n[tool] ${title}\n`
+      const id = update.toolCallId
+      const kind = update.kind ?? "other"
+      const title = scrubSecrets(update.title ?? "")
+      const command = extractCommand(update.rawInput, title)
+      const detail = command !== undefined ? scrubSecrets(command) : ""
+      const durable = detail !== "" ? `\n$ ${detail}\n` : title !== "" ? `\n[${kind}] ${title}\n` : ""
+      return { stream: toolFrame(id, 0, kind, title, detail), durable }
     }
     case "tool_call_update": {
       const status = update.status
       if (status !== "completed" && status !== "failed") {
-        return ""
+        return { stream: "", durable: "" }
       }
-      return `[tool ${status}]\n`
+      const id = update.toolCallId
+      const kind = update.kind ?? "other"
+      const title = scrubSecrets(update.title ?? "")
+      const output = boundedDetail(stripExitMarker(scrubSecrets(extractContentText(update.content))))
+      const durable = status === "failed" && output !== "" ? `  ✗ ${output.split("\n")[0]}\n` : ""
+      return { stream: toolFrame(id, status === "completed" ? 1 : 2, kind, title, output), durable }
     }
     case "plan": {
-      const lines = update.entries.map((entry) => entry.content).filter((line) => line !== "")
-      return lines.length === 0 ? "" : `\n[plan]\n${lines.map((line) => `- ${line}`).join("\n")}\n`
+      const lines = update.entries
+        .map((entry) => scrubSecrets(entry.content))
+        .filter((line) => line !== "")
+      if (lines.length === 0) {
+        return { stream: "", durable: "" }
+      }
+      const text = `Plan:\n${lines.map((line) => `- ${line}`).join("\n")}`
+      return { stream: noteFrame(text, "info"), durable: `\n[plan]\n${lines.map((line) => `- ${line}`).join("\n")}\n` }
     }
     default:
-      return ""
+      return { stream: "", durable: "" }
   }
 }
 
@@ -366,6 +503,7 @@ export const start = (request: AgentRequest): AgentJob => {
   let timedOut = false
   let sessionId = ""
   let outputBytes = 0
+  let streamBytes = 0
   let truncated = false
   let outputText = ""
   let agentCapabilities: Record<string, unknown> = {}
@@ -430,7 +568,9 @@ export const start = (request: AgentRequest): AgentJob => {
     })
   }
 
-  const emit = (raw: string): void => {
+  // The durable copy: bounded, secret-scrubbed prose accumulated into the
+  // outcome output. This is the persisted authority the tool step records.
+  const emitDurable = (raw: string): void => {
     if (raw === "" || settled) {
       return
     }
@@ -444,7 +584,26 @@ export const start = (request: AgentRequest): AgentJob => {
     truncated = truncated || bounded.length < scrubbed.length
     outputBytes += bounded.length
     outputText += bounded
+  }
+
+  // The live-rail copy: structured tool frames plus prose, already scrubbed by
+  // renderUpdate. Bounded separately so a chatty tool trace cannot starve the
+  // durable budget, and never accumulated into the persisted output.
+  const emitStream = (raw: string): void => {
+    if (raw === "" || settled || streamBytes >= request.limits.maximumOutputBytes) {
+      return
+    }
+    const remaining = request.limits.maximumOutputBytes - streamBytes
+    const bounded = raw.length > remaining ? raw.slice(0, remaining) : raw
+    streamBytes += bounded.length
     request.onChunk(bounded)
+  }
+
+  // Render one update to both surfaces at once.
+  const emitUpdate = (update: acp.SessionUpdate): void => {
+    const { durable, stream } = renderUpdate(update)
+    emitStream(stream)
+    emitDurable(durable)
   }
 
   child.stderr.resume()
@@ -505,7 +664,9 @@ export const start = (request: AgentRequest): AgentJob => {
     if (option === undefined) {
       return { outcome: { outcome: "cancelled" } }
     }
-    emit(`\n[permission ${allowed ? "granted" : "denied"}] ${toolCall.title ?? toolCall.kind ?? ""}\n`)
+    const subject = scrubSecrets(toolCall.title ?? toolCall.kind ?? "")
+    emitStream(noteFrame(`Permission ${allowed ? "granted" : "denied"}: ${subject}`, allowed ? "info" : "warn"))
+    emitDurable(`\n[permission ${allowed ? "granted" : "denied"}] ${subject}\n`)
     return { outcome: { outcome: "selected", optionId: option.optionId } }
   }
 
@@ -515,7 +676,7 @@ export const start = (request: AgentRequest): AgentJob => {
   const app = acp.client({ name: "sarah-computer-controller" })
     .onRequest(acp.methods.client.session.requestPermission, (ctx) => handlePermission(ctx.params))
     .onNotification(acp.methods.client.session.update, (ctx) => {
-      emit(updateText(ctx.params.update))
+      emitUpdate(ctx.params.update)
     })
 
   const run = app.connectWith(stream, async (ctx): Promise<void> => {

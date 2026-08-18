@@ -58,15 +58,17 @@ describe("AcpAgent", () => {
     const { chunks, request } = baseRequest("--permission")
     const outcome = await AcpAgent.start(request).done
     expect(outcome.status).toBe("completed")
-    expect(chunks.join("")).toContain("[permission granted]")
+    // The stream carries a note frame; the durable output stays human-readable.
+    expect(chunks.join("")).toContain(String.fromCharCode(30) + "N")
     expect(chunks.join("")).toContain("permitted, done.")
+    expect(outcome.output).toContain("[permission granted]")
   })
 
   it("rejects a permission request when local policy denies it", async () => {
-    const { chunks, request } = baseRequest("--permission", { decidePermission: () => false })
+    const { request } = baseRequest("--permission", { decidePermission: () => false })
     const outcome = await AcpAgent.start(request).done
     expect(outcome.status).toBe("refused")
-    expect(chunks.join("")).toContain("[permission denied]")
+    expect(outcome.output).toContain("[permission denied]")
   })
 
   it("never selects a bypass-style permission option, even when policy allows the tool", async () => {
@@ -305,25 +307,82 @@ describe("boundedLineStream", () => {
   })
 })
 
-describe("updateText", () => {
-  it("extracts agent message chunks", () => {
-    expect(
-      AcpAgent.updateText({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hi" } })
-    ).toBe("hi")
+describe("renderUpdate", () => {
+  // Decode a base64 frame field back to text for assertions.
+  const decode = (value: string): string => Buffer.from(value, "base64").toString("utf8")
+  const RS = String.fromCharCode(30)
+  const US = String.fromCharCode(31)
+
+  it("passes agent message chunks through to both surfaces", () => {
+    const rendered = AcpAgent.renderUpdate({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "hi" }
+    })
+    expect(rendered.stream).toBe("hi")
+    expect(rendered.durable).toBe("hi")
   })
 
-  it("summarizes tool calls and plans, and drops thoughts", () => {
-    expect(
-      AcpAgent.updateText({ sessionUpdate: "tool_call", toolCallId: "c1", title: "Read file" })
-    ).toContain("Read file")
-    expect(
-      AcpAgent.updateText({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "x" } })
-    ).toBe("")
-    expect(
-      AcpAgent.updateText({
-        sessionUpdate: "plan",
-        entries: [{ content: "step one", priority: "high", status: "pending" }]
-      })
-    ).toContain("step one")
+  it("drops agent thoughts", () => {
+    const rendered = AcpAgent.renderUpdate({
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "x" }
+    })
+    expect(rendered.stream).toBe("")
+    expect(rendered.durable).toBe("")
+  })
+
+  it("frames a tool call with its extracted command and a clean durable line", () => {
+    const rendered = AcpAgent.renderUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "c1",
+      title: "Terminal",
+      kind: "execute",
+      rawInput: { command: "git status --short" }
+    })
+    const fields = rendered.stream.split(US)
+    // RS "T" | id | phase | kind | b64(title) | b64(detail)
+    expect(fields[1]).toBe("c1")
+    expect(fields[2]).toBe("0")
+    expect(fields[3]).toBe("execute")
+    expect(decode(fields[4])).toBe("Terminal")
+    expect(decode(fields[5].trimEnd())).toBe("git status --short")
+    // The durable copy is human-readable with no control bytes.
+    expect(rendered.durable).toContain("$ git status --short")
+    expect(rendered.durable).not.toContain(RS)
+  })
+
+  it("frames a completed tool update carrying a bounded output snippet", () => {
+    const rendered = AcpAgent.renderUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "c1",
+      status: "completed",
+      content: [{ type: "content", content: { type: "text", text: "On branch main\n<exited with exit code 0>" } }]
+    })
+    const fields = rendered.stream.split(US)
+    expect(fields[1]).toBe("c1")
+    expect(fields[2]).toBe("1")
+    expect(decode(fields[5].trimEnd())).toBe("On branch main")
+    // A completed update adds nothing to the durable prose.
+    expect(rendered.durable).toBe("")
+  })
+
+  it("marks a failed tool update and records its first output line durably", () => {
+    const rendered = AcpAgent.renderUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "c2",
+      status: "failed",
+      content: [{ type: "content", content: { type: "text", text: "permission denied\nsecond line" } }]
+    })
+    expect(rendered.stream.split(US)[2]).toBe("2")
+    expect(rendered.durable).toContain("✗ permission denied")
+  })
+
+  it("frames a plan as a note", () => {
+    const rendered = AcpAgent.renderUpdate({
+      sessionUpdate: "plan",
+      entries: [{ content: "step one", priority: "high", status: "pending" }]
+    })
+    expect(rendered.stream.startsWith(`${RS}N`)).toBe(true)
+    expect(rendered.durable).toContain("step one")
   })
 })
