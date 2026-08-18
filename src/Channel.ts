@@ -63,6 +63,14 @@ export const serve = (options: ChannelOptions, handlers: ChannelHandlers): Promi
     const joinRef = "1"
     let ref = 1
     let heartbeat: NodeJS.Timeout | undefined
+    // Half-open detection: a heartbeat is pushed on a fixed ref; the server's
+    // phx_reply on that ref clears the pending flag. If the next interval fires
+    // while the previous heartbeat is still unacknowledged, the connection is
+    // dead (a Cloud Run instance drained without a clean close) and we finish
+    // so the process exits and its supervisor relaunches a fresh connection to
+    // the live instance.
+    const heartbeatRef = "heartbeat"
+    let heartbeatPending = false
     const socket = new WebSocket(socketUrl(options.endpoint, options.token))
 
     const nextRef = (): string => {
@@ -103,10 +111,19 @@ export const serve = (options: ChannelOptions, handlers: ChannelHandlers): Promi
 
     socket.on("open", () => {
       socket.send(JSON.stringify([joinRef, joinRef, topic, "phx_join", {}]))
-      heartbeat = setInterval(
-        () => push("phoenix", "heartbeat", {}, false),
-        options.heartbeatMillis ?? 30_000
-      )
+      heartbeat = setInterval(() => {
+        if (heartbeatPending) {
+          // The previous heartbeat was never answered: the connection is dead.
+          finish("heartbeat_timeout")
+          return
+        }
+        if (socket.readyState !== WebSocket.OPEN) {
+          finish("socket_not_open")
+          return
+        }
+        heartbeatPending = true
+        socket.send(JSON.stringify([null, heartbeatRef, "phoenix", "heartbeat", {}]))
+      }, options.heartbeatMillis ?? 30_000)
     })
 
     socket.on("message", (data) => {
@@ -120,6 +137,12 @@ export const serve = (options: ChannelOptions, handlers: ChannelHandlers): Promi
         return
       }
       const [, frameRef, frameTopic, event, payload] = parsed
+      // The server's heartbeat acknowledgement arrives on the "phoenix" topic;
+      // clear the pending flag before the computer-topic filter drops it.
+      if (frameTopic === "phoenix" && event === "phx_reply" && frameRef === heartbeatRef) {
+        heartbeatPending = false
+        return
+      }
       if (frameTopic !== topic) {
         return
       }

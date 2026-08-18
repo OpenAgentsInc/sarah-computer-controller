@@ -134,4 +134,95 @@ describe("Channel agent dispatch", () => {
     )
     expect(agentCalls[0]?.agentId).toBe("")
   })
+
+  it("finishes with heartbeat_timeout when the server stops answering heartbeats", async () => {
+    // A dead-but-not-closed connection: the server accepts the join, then goes
+    // silent (never answering heartbeats and never sending a close), exactly
+    // like a Cloud Run instance drained out from under the socket.
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 })
+    await new Promise<void>((resolve) => server?.once("listening", resolve))
+    const address = server.address()
+    const port = typeof address === "object" && address !== null ? address.port : 0
+
+    server.on("connection", (socket: WebSocket) => {
+      socket.on("message", (data) => {
+        const frame = JSON.parse(String(data)) as Frame
+        const [joinRef, ref, frameTopic, event] = frame
+        if (event === "phx_join") {
+          socket.send(JSON.stringify([joinRef, ref, frameTopic, "phx_reply", { status: "ok", response: {} }]))
+        }
+        // Heartbeats are deliberately ignored.
+      })
+    })
+
+    const reason = await Channel.serve(
+      {
+        endpoint: `http://127.0.0.1:${port}`,
+        token: "token-test",
+        machineId,
+        hello: { agent_version: "test" },
+        heartbeatMillis: 20
+      },
+      {
+        onProbe: () => Promise.resolve({}),
+        onRun: () => undefined,
+        onAgent: () => undefined,
+        onCancel: () => undefined,
+        onClosed: () => undefined,
+        onJoined: () => undefined,
+        onEvent: () => undefined
+      }
+    )
+    expect(reason).toBe("heartbeat_timeout")
+  })
+
+  it("stays connected while the server answers heartbeats", async () => {
+    server = new WebSocketServer({ host: "127.0.0.1", port: 0 })
+    await new Promise<void>((resolve) => server?.once("listening", resolve))
+    const address = server.address()
+    const port = typeof address === "object" && address !== null ? address.port : 0
+
+    server.on("connection", (socket: WebSocket) => {
+      let heartbeatsAnswered = 0
+      socket.on("message", (data) => {
+        const frame = JSON.parse(String(data)) as Frame
+        const [joinRef, ref, frameTopic, event] = frame
+        if (event === "phx_join") {
+          socket.send(JSON.stringify([joinRef, ref, frameTopic, "phx_reply", { status: "ok", response: {} }]))
+          return
+        }
+        if (frameTopic === "phoenix" && event === "heartbeat") {
+          // Answer on the same ref, as Phoenix does.
+          socket.send(JSON.stringify([null, ref, "phoenix", "phx_reply", { status: "ok", response: {} }]))
+          heartbeatsAnswered += 1
+          // After several healthy cycles, close from the server side so the
+          // test ends. A broken heartbeat check would have finished earlier
+          // with heartbeat_timeout instead of these clean cycles.
+          if (heartbeatsAnswered >= 3) {
+            socket.close()
+          }
+        }
+      })
+    })
+
+    const reason = await Channel.serve(
+      {
+        endpoint: `http://127.0.0.1:${port}`,
+        token: "token-test",
+        machineId,
+        hello: { agent_version: "test" },
+        heartbeatMillis: 20
+      },
+      {
+        onProbe: () => Promise.resolve({}),
+        onRun: () => undefined,
+        onAgent: () => undefined,
+        onCancel: () => undefined,
+        onClosed: () => undefined,
+        onJoined: () => undefined,
+        onEvent: () => undefined
+      }
+    )
+    expect(reason).toBe("closed")
+  })
 })
