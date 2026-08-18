@@ -76,9 +76,10 @@ At `curated` tier and above, Sarah can delegate work to a coding agent over the
 [Agent Client Protocol](https://agentclientprotocol.com). The controller is the
 ACP client: it spawns the agent as a subprocess (argv only, no shell), streams
 bounded progress back, and answers the agent's permission requests from the
-local tier — `probe` rejects everything, `curated` grants only read-shaped
-tools, `shell` grants what your local policy allows. Grants are always one-shot
-(`allow_once`); bypass-style options are never selected.
+local tier — `probe` rejects everything, `curated` grants read-shaped
+tools plus file Edit/Write under declared roots, and execute on the
+named `curatedExecute` allowlist. `shell` grants all kinds. Grants are
+always one-shot (`allow_once`); bypass-style options are never selected.
 
 The catalog of agents Sarah may name has three layers, in precedence order:
 

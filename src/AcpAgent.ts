@@ -105,6 +105,13 @@ export interface AgentJob {
 export const readShapedPermissionKinds: ReadonlyArray<string> = ["read", "search", "fetch", "think"]
 
 /**
+ * File-mutating ACP kinds a curated-tier coding delegation may grant, when
+ * the target path is inside a declared root (or no path is known because
+ * cwd is already constrained to a root). `move` and `delete` stay denied.
+ */
+export const writeShapedPermissionKinds: ReadonlyArray<string> = ["edit", "write"]
+
+/**
  * Execute-kind commands the `curated` tier may additionally grant to a
  * delegated coding agent. Owner opt-in, widened 2026-08-18: a delegated agent
  * that cannot even `ls`/`cat`/`git status`/`git log` to read the repo it was
@@ -193,15 +200,16 @@ export interface PermissionPolicyQuery {
 /**
  * Which ACP permission requests the local tier grants. `shell` allows any
  * tool the agent proposes (each grant is still a one-shot `allow_once`);
- * `curated` allows read-shaped tool kinds plus execute commands whose every
- * chain segment is on the named `curatedExecute` allowlist; `probe` (and
- * anything unrecognized) is refused. Never maps to an "always" grant on its
- * own.
+ * `curated` allows read-shaped tool kinds, file edits/writes under declared
+ * roots, and execute commands whose every chain segment is on the named
+ * `curatedExecute` allowlist; `probe` (and anything unrecognized) is refused.
+ * Never maps to an "always" grant on its own.
  */
 export const permissionAllowed = (
   tier: Tier,
   query: string | PermissionPolicyQuery,
-  curatedExecute: ReadonlyArray<string> = defaultCuratedExecute
+  curatedExecute: ReadonlyArray<string> = defaultCuratedExecute,
+  roots: ReadonlyArray<string> = []
 ): boolean => {
   const normalized: PermissionPolicyQuery = typeof query === "string" ? { kind: query } : query
   if (tier === "shell") {
@@ -210,6 +218,9 @@ export const permissionAllowed = (
   if (tier === "curated") {
     if (readShapedPermissionKinds.includes(normalized.kind)) {
       return true
+    }
+    if (writeShapedPermissionKinds.includes(normalized.kind)) {
+      return writePathAllowed(normalized, roots)
     }
     if (normalized.kind === "execute") {
       const raw = normalized.rawInput as Record<string, unknown> | undefined
@@ -220,6 +231,38 @@ export const permissionAllowed = (
     return false
   }
   return false
+}
+
+const writePathAllowed = (query: PermissionPolicyQuery, roots: ReadonlyArray<string>): boolean => {
+  const filePath = extractFilePath(query.rawInput)
+  if (filePath === undefined || filePath === "") {
+    return true
+  }
+  if (roots.length === 0) {
+    return true
+  }
+  const absolute = filePath.startsWith("/") ? filePath : `${roots[0] ?? ""}/${filePath}`
+  return roots.some((root) => pathUnderRoot(absolute, root))
+}
+
+const extractFilePath = (rawInput: unknown): string | undefined => {
+  const raw = asRecord(rawInput)
+  if (raw === undefined) {
+    return undefined
+  }
+  for (const key of ["path", "file_path", "filePath", "file"]) {
+    const value = raw[key]
+    if (typeof value === "string" && value !== "") {
+      return value
+    }
+  }
+  return undefined
+}
+
+const pathUnderRoot = (candidate: string, root: string): boolean => {
+  const target = candidate.replace(/\/+$/, "")
+  const base = root.replace(/\/+$/, "")
+  return target === base || target.startsWith(`${base}/`)
 }
 
 /**

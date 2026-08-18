@@ -174,14 +174,37 @@ describe("permissionAllowed", () => {
     expect(AcpAgent.permissionAllowed("probe", "execute")).toBe(false)
   })
 
-  it("allows only read-shaped kinds at curated tier", () => {
+  it("allows read-shaped kinds and file edits at curated tier", () => {
     expect(AcpAgent.permissionAllowed("curated", "read")).toBe(true)
     expect(AcpAgent.permissionAllowed("curated", "search")).toBe(true)
     expect(AcpAgent.permissionAllowed("curated", "fetch")).toBe(true)
     expect(AcpAgent.permissionAllowed("curated", "think")).toBe(true)
     expect(AcpAgent.permissionAllowed("curated", "execute")).toBe(false)
-    expect(AcpAgent.permissionAllowed("curated", "edit")).toBe(false)
+    expect(AcpAgent.permissionAllowed("curated", "edit")).toBe(true)
+    expect(AcpAgent.permissionAllowed("curated", "write")).toBe(true)
+    expect(AcpAgent.permissionAllowed("curated", "move")).toBe(false)
+    expect(AcpAgent.permissionAllowed("curated", "delete")).toBe(false)
     expect(AcpAgent.permissionAllowed("curated", "")).toBe(false)
+  })
+
+  it("grants curated edit only for paths inside declared roots", () => {
+    const roots = ["/Users/me/work/sarah"]
+    expect(
+      AcpAgent.permissionAllowed(
+        "curated",
+        { kind: "edit", rawInput: { path: "/Users/me/work/sarah/lib/chat_live.ex" } },
+        AcpAgent.defaultCuratedExecute,
+        roots
+      )
+    ).toBe(true)
+    expect(
+      AcpAgent.permissionAllowed(
+        "curated",
+        { kind: "write", rawInput: { file_path: "/Users/me/work/openagents/secret.ts" } },
+        AcpAgent.defaultCuratedExecute,
+        roots
+      )
+    ).toBe(false)
   })
 
   it("grants curated execute only for allowlisted command chains", () => {
