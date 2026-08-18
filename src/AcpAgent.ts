@@ -105,13 +105,54 @@ export interface AgentJob {
 export const readShapedPermissionKinds: ReadonlyArray<string> = ["read", "search", "fetch", "think"]
 
 /**
- * Execute-kind commands the `curated` tier may additionally grant, owner
- * opt-in recorded 2026-08-17: a delegated agent that can read the repo but
- * cannot run `gh` to post the issue it drafted is a broken loop. The list is
- * named programs, never patterns; `cd` is tolerated only as a chain prefix.
- * Operators can widen or clear it via the machine config `curatedExecute`.
+ * Execute-kind commands the `curated` tier may additionally grant to a
+ * delegated coding agent. Owner opt-in, widened 2026-08-18: a delegated agent
+ * that cannot even `ls`/`cat`/`git status`/`git log` to read the repo it was
+ * asked to change is a broken loop — the earlier `["gh"]`-only list denied
+ * every exploration command Claude Code proposed. The set is the curated
+ * dev loop: read/inspect tools, version control, and the package/build/test
+ * runners a coding task needs to verify its own work, on the owner's own
+ * paired machine. It is named programs, never patterns; `cd` is tolerated
+ * only as a chain prefix; and it deliberately excludes shell interpreters
+ * (`bash`/`sh`/`zsh`), arbitrary-exec launchers (`env`/`xargs`/`eval`), and
+ * privilege/remote tools (`sudo`/`ssh`) so the per-segment chain guard stays
+ * meaningful. The compiled-in denied-command floor still applies to direct
+ * `run`; delegated agents edit files through their own in-process tools, not
+ * this shell surface. Operators can widen or clear it via the machine config
+ * `curatedExecute`.
  */
-export const defaultCuratedExecute: ReadonlyArray<string> = ["gh"]
+export const defaultCuratedExecute: ReadonlyArray<string> = [
+  "git",
+  "gh",
+  "ls",
+  "cat",
+  "head",
+  "tail",
+  "wc",
+  "pwd",
+  "which",
+  "find",
+  "rg",
+  "grep",
+  "sed",
+  "awk",
+  "sort",
+  "uniq",
+  "cut",
+  "diff",
+  "echo",
+  "stat",
+  "file",
+  "node",
+  "npm",
+  "npx",
+  "pnpm",
+  "python3",
+  "cargo",
+  "go",
+  "make",
+  "mix"
+]
 
 /**
  * True when every `&&` / `||` / `;` / `|` / newline segment of the command
