@@ -105,17 +105,78 @@ export interface AgentJob {
 export const readShapedPermissionKinds: ReadonlyArray<string> = ["read", "search", "fetch", "think"]
 
 /**
+ * Execute-kind commands the `curated` tier may additionally grant, owner
+ * opt-in recorded 2026-08-17: a delegated agent that can read the repo but
+ * cannot run `gh` to post the issue it drafted is a broken loop. The list is
+ * named programs, never patterns; `cd` is tolerated only as a chain prefix.
+ * Operators can widen or clear it via the machine config `curatedExecute`.
+ */
+export const defaultCuratedExecute: ReadonlyArray<string> = ["gh"]
+
+/**
+ * True when every `&&` / `||` / `;` / `|` / newline segment of the command
+ * starts with an allowlisted program (or `cd`), and at least one segment
+ * actually runs an allowlisted program. Conservative on purpose: any
+ * unrecognized segment head — including pipe targets — refuses the whole
+ * command.
+ */
+export const commandChainAllowed = (
+  command: string,
+  allowlist: ReadonlyArray<string>
+): boolean => {
+  const segments = command.split(/&&|\|\||;|\||\n/)
+  let sawAllowlisted = false
+  for (const segment of segments) {
+    const first = segment.trim().split(/\s+/)[0] ?? ""
+    if (first === "") {
+      return false
+    }
+    if (first === "cd") {
+      continue
+    }
+    if (!allowlist.includes(first)) {
+      return false
+    }
+    sawAllowlisted = true
+  }
+  return sawAllowlisted
+}
+
+/** The fields of a permission request that local policy examines. */
+export interface PermissionPolicyQuery {
+  readonly kind: string
+  readonly title?: string
+  readonly rawInput?: unknown
+}
+
+/**
  * Which ACP permission requests the local tier grants. `shell` allows any
  * tool the agent proposes (each grant is still a one-shot `allow_once`);
- * `curated` allows only read-shaped tool kinds; `probe` (and anything
- * unrecognized) is refused. Never maps to an "always" grant on its own.
+ * `curated` allows read-shaped tool kinds plus execute commands whose every
+ * chain segment is on the named `curatedExecute` allowlist; `probe` (and
+ * anything unrecognized) is refused. Never maps to an "always" grant on its
+ * own.
  */
-export const permissionAllowed = (tier: Tier, kind: string): boolean => {
+export const permissionAllowed = (
+  tier: Tier,
+  query: string | PermissionPolicyQuery,
+  curatedExecute: ReadonlyArray<string> = defaultCuratedExecute
+): boolean => {
+  const normalized: PermissionPolicyQuery = typeof query === "string" ? { kind: query } : query
   if (tier === "shell") {
     return true
   }
   if (tier === "curated") {
-    return readShapedPermissionKinds.includes(kind)
+    if (readShapedPermissionKinds.includes(normalized.kind)) {
+      return true
+    }
+    if (normalized.kind === "execute") {
+      const raw = normalized.rawInput as Record<string, unknown> | undefined
+      const fromInput = raw !== undefined && typeof raw["command"] === "string" ? (raw["command"] as string) : ""
+      const command = fromInput !== "" ? fromInput : (normalized.title ?? "")
+      return command !== "" && commandChainAllowed(command, curatedExecute)
+    }
+    return false
   }
   return false
 }

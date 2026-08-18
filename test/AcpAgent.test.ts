@@ -182,6 +182,22 @@ describe("permissionAllowed", () => {
     expect(AcpAgent.permissionAllowed("curated", "")).toBe(false)
   })
 
+  it("grants curated execute only for allowlisted command chains", () => {
+    const query = (command: string) => ({ kind: "execute", rawInput: { command } })
+    expect(AcpAgent.permissionAllowed("curated", query("gh issue create --title x"))).toBe(true)
+    expect(AcpAgent.permissionAllowed("curated", query("cd /repo && gh pr list"))).toBe(true)
+    expect(AcpAgent.permissionAllowed("curated", query("gh api repos | jq .name"))).toBe(false)
+    expect(AcpAgent.permissionAllowed("curated", query("gh issue list; rm -rf /"))).toBe(false)
+    expect(AcpAgent.permissionAllowed("curated", query("rm -rf /"))).toBe(false)
+    expect(AcpAgent.permissionAllowed("curated", query("cd /repo"))).toBe(false)
+    expect(AcpAgent.permissionAllowed("curated", query(""))).toBe(false)
+    // Title is the fallback command source when rawInput carries none.
+    expect(AcpAgent.permissionAllowed("curated", { kind: "execute", title: "gh issue view 85" })).toBe(true)
+    // Operator config can widen the list; probe never grants execute.
+    expect(AcpAgent.permissionAllowed("curated", query("git status"), ["gh", "git"])).toBe(true)
+    expect(AcpAgent.permissionAllowed("probe", query("gh issue list"))).toBe(false)
+  })
+
   it("allows any proposed tool at shell tier", () => {
     expect(AcpAgent.permissionAllowed("shell", "execute")).toBe(true)
     expect(AcpAgent.permissionAllowed("shell", "edit")).toBe(true)

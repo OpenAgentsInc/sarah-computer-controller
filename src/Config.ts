@@ -36,6 +36,12 @@ export interface ControllerConfig {
    * named opt-in (`--allow registry-agents`) like every widened capability.
    */
   readonly registryAgents: boolean
+  /**
+   * Named programs a curated-tier ACP delegation may execute (every command
+   * chain segment must head with one of these, or `cd`). Owner opt-in
+   * recorded 2026-08-17 so delegated agents can use `gh`.
+   */
+  readonly curatedExecute: ReadonlyArray<string>
 }
 
 export const defaultEndpoint = "https://stage.openagents.com"
@@ -64,7 +70,8 @@ export const defaultConfig = (): ControllerConfig => ({
   machineName: os.hostname(),
   machineId: "",
   agents: [],
-  registryAgents: false
+  registryAgents: false,
+  curatedExecute: ["gh"]
 })
 
 const isTier = (value: unknown): value is Tier => value === "probe" || value === "curated" || value === "shell"
@@ -125,7 +132,10 @@ export const readConfig = (): ControllerConfig => {
     machineName: typeof record["machineName"] === "string" ? record["machineName"] : fallback.machineName,
     machineId: typeof record["machineId"] === "string" ? record["machineId"] : fallback.machineId,
     agents: readAgentEntries(record["agents"]),
-    registryAgents: record["registryAgents"] === true
+    registryAgents: record["registryAgents"] === true,
+    curatedExecute: "curatedExecute" in record
+      ? stringArray(record["curatedExecute"]).map((entry) => entry.trim()).filter((entry) => entry !== "").slice(0, 32)
+      : fallback.curatedExecute
   }
 }
 

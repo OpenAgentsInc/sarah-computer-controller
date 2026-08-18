@@ -151,7 +151,7 @@ export const handleAgentEvent = (
         timeoutMillis: boundedTimeout(payload["timeout_ms"], AcpAgent.defaultAgentLimits.timeoutMillis, 600_000)
       },
       onChunk: respond.chunk,
-      decidePermission: (query) => AcpAgent.permissionAllowed(deps.config.tier, query.kind),
+      decidePermission: (query) => AcpAgent.permissionAllowed(deps.config.tier, query, deps.config.curatedExecute),
       agentLabel: agentId
     })
     deps.registerCancel(requestId, job.cancel)
