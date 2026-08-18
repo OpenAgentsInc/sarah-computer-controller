@@ -21,7 +21,12 @@ export interface Responder {
 export interface ChannelHandlers {
   readonly onProbe: (requestId: string) => Promise<unknown>
   readonly onRun: (requestId: string, payload: Record<string, unknown>, respond: Responder) => void
-  readonly onDevin: (requestId: string, payload: Record<string, unknown>, respond: Responder) => void
+  /**
+   * ACP delegation. Dispatched for the `agent` event (agent_id from the
+   * body) and, for one release of legacy compatibility, the `devin` event
+   * mapped to agent_id "devin".
+   */
+  readonly onAgent: (requestId: string, agentId: string, payload: Record<string, unknown>, respond: Responder) => void
   readonly onCancel: (requestId: string) => void
   readonly onClosed: () => void
   readonly onJoined: () => void
@@ -159,9 +164,17 @@ export const serve = (options: ChannelOptions, handlers: ChannelHandlers): Promi
         return
       }
 
+      if (event === "agent") {
+        const agentId = typeof body["agent_id"] === "string" ? body["agent_id"] : ""
+        handlers.onEvent(`agent delegation requested (${agentId || "?"}, ${requestId.slice(0, 8)})`)
+        handlers.onAgent(requestId, agentId, body, responder(requestId))
+        return
+      }
+
+      // Legacy event name, kept for one release: maps to agent_id "devin".
       if (event === "devin") {
         handlers.onEvent(`devin delegation requested (${requestId.slice(0, 8)})`)
-        handlers.onDevin(requestId, body, responder(requestId))
+        handlers.onAgent(requestId, "devin", body, responder(requestId))
         return
       }
 

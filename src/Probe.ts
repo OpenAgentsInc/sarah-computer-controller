@@ -9,6 +9,7 @@ import * as os from "node:os"
 import { Effect } from "effect"
 import type { ChildProcessSpawner } from "effect/unstable/process"
 
+import type { AcpAgentInventoryEntry } from "./AgentCatalog.js"
 import { executeQuietly } from "./Executor.js"
 
 export interface ToolReport {
@@ -35,6 +36,8 @@ export interface ProbeReport {
   readonly codingAgents: ReadonlyArray<ToolReport>
   readonly toolchains: ReadonlyArray<ToolReport>
   readonly roots: ReadonlyArray<string>
+  /** ACP agents this controller can delegate to, from the committed catalog. */
+  readonly acpAgents: ReadonlyArray<AcpAgentInventoryEntry>
 }
 
 interface Probed {
@@ -110,7 +113,8 @@ export const hostReport = (): HostReport => ({
 })
 
 export const probe = (
-  roots: ReadonlyArray<string>
+  roots: ReadonlyArray<string>,
+  acpAgents: ReadonlyArray<AcpAgentInventoryEntry> = []
 ): Effect.Effect<ProbeReport, never, ChildProcessSpawner.ChildProcessSpawner> =>
   Effect.gen(function*() {
     const cwd = roots[0] ?? process.cwd()
@@ -125,7 +129,8 @@ export const probe = (
       host: hostReport(),
       codingAgents,
       toolchains,
-      roots
+      roots,
+      acpAgents
     }
   })
 
@@ -142,11 +147,17 @@ export const wireReport = (report: ProbeReport): Record<string, unknown> => ({
   uptime_seconds: report.host.uptimeSeconds,
   coding_agents: report.codingAgents,
   toolchains: report.toolchains,
-  roots: report.roots
+  roots: report.roots,
+  acp_agents: report.acpAgents
 })
 
 const formatTool = (tool: ToolReport): string =>
   tool.present ? `  ${tool.name.padEnd(14)} ${tool.version || "present"}` : `  ${tool.name.padEnd(14)} —`
+
+const formatAcpAgent = (agent: AcpAgentInventoryEntry): string => {
+  const auth = agent.auth_ready === true ? "auth ready" : agent.auth_ready === false ? "auth missing" : "auth unknown"
+  return `  ${agent.id.padEnd(14)} ${(agent.version || "—").padEnd(12)} ${agent.source.padEnd(8)} ${auth}`
+}
 
 export const formatReport = (report: ProbeReport): string => {
   const lines = [
@@ -154,6 +165,9 @@ export const formatReport = (report: ProbeReport): string => {
     `hostname  ${report.host.hostname}`,
     `cpus      ${report.host.cpuCount}`,
     `roots     ${report.roots.join(", ") || "(none declared)"}`,
+    "",
+    "acp agents",
+    ...(report.acpAgents.length > 0 ? report.acpAgents.map(formatAcpAgent) : ["  (none)"]),
     "",
     "coding agents",
     ...report.codingAgents.map(formatTool),

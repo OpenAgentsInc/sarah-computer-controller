@@ -9,6 +9,18 @@ import * as path from "node:path"
 
 import type { Tier } from "./Policy.js"
 
+/**
+ * One operator-configured ACP agent: how to spawn it (argv only, no shell)
+ * and which named environment variables may pass through the scrubbed
+ * allowlist to it. Env passthrough is a deliberate, recorded opt-in per
+ * agent — never a server-supplied value.
+ */
+export interface AgentConfigEntry {
+  readonly id: string
+  readonly argv: ReadonlyArray<string>
+  readonly env: ReadonlyArray<string>
+}
+
 export interface ControllerConfig {
   readonly endpoint: string
   readonly tier: Tier
@@ -16,6 +28,14 @@ export interface ControllerConfig {
   readonly preApproved: ReadonlyArray<string>
   readonly machineName: string
   readonly machineId: string
+  /** Operator-installed ACP agents, keyed by the id Sarah asks for. */
+  readonly agents: ReadonlyArray<AgentConfigEntry>
+  /**
+   * Opt-in: allow resolving unknown agent ids from the vendored ACP registry
+   * snapshot. Off by default — resolution downloads and runs code, so it is a
+   * named opt-in (`--allow registry-agents`) like every widened capability.
+   */
+  readonly registryAgents: boolean
 }
 
 export const defaultEndpoint = "https://stage.openagents.com"
@@ -42,13 +62,49 @@ export const defaultConfig = (): ControllerConfig => ({
   roots: [],
   preApproved: [],
   machineName: os.hostname(),
-  machineId: ""
+  machineId: "",
+  agents: [],
+  registryAgents: false
 })
 
 const isTier = (value: unknown): value is Tier => value === "probe" || value === "curated" || value === "shell"
 
 const stringArray = (value: unknown): ReadonlyArray<string> =>
   Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []
+
+const agentIdPattern = /^[a-z0-9][a-z0-9._-]{0,63}$/
+
+/**
+ * Normalize the on-disk `agents` object (`{ "devin": { "argv": [...], "env":
+ * [...] } }`) into validated entries. Malformed entries are dropped rather
+ * than trusted: an agent with no argv cannot be spawned.
+ */
+export const readAgentEntries = (value: unknown): ReadonlyArray<AgentConfigEntry> => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return []
+  }
+  const entries: Array<AgentConfigEntry> = []
+  for (const [id, raw] of Object.entries(value)) {
+    if (!agentIdPattern.test(id) || typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      continue
+    }
+    const body = raw as Record<string, unknown>
+    const argv = stringArray(body["argv"])
+    if (argv.length === 0) {
+      continue
+    }
+    entries.push({ id, argv, env: stringArray(body["env"]) })
+  }
+  return entries
+}
+
+const writeAgentEntries = (agents: ReadonlyArray<AgentConfigEntry>): Record<string, unknown> => {
+  const out: Record<string, unknown> = {}
+  for (const entry of agents) {
+    out[entry.id] = { argv: entry.argv, env: entry.env }
+  }
+  return out
+}
 
 export const readConfig = (): ControllerConfig => {
   const location = configPath()
@@ -67,13 +123,16 @@ export const readConfig = (): ControllerConfig => {
     roots: stringArray(record["roots"]),
     preApproved: stringArray(record["preApproved"]),
     machineName: typeof record["machineName"] === "string" ? record["machineName"] : fallback.machineName,
-    machineId: typeof record["machineId"] === "string" ? record["machineId"] : fallback.machineId
+    machineId: typeof record["machineId"] === "string" ? record["machineId"] : fallback.machineId,
+    agents: readAgentEntries(record["agents"]),
+    registryAgents: record["registryAgents"] === true
   }
 }
 
 export const writeConfig = (config: ControllerConfig): void => {
   fs.mkdirSync(configDirectory(), { recursive: true, mode: 0o700 })
-  fs.writeFileSync(configPath(), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
+  const serialized = { ...config, agents: writeAgentEntries(config.agents) }
+  fs.writeFileSync(configPath(), `${JSON.stringify(serialized, null, 2)}\n`, { mode: 0o600 })
 }
 
 export const hasToken = (): boolean => fs.existsSync(tokenPath())

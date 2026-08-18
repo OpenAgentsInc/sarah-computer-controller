@@ -1,13 +1,12 @@
-import * as path from "node:path"
-
 import { Console, Effect } from "effect"
 import { Command, Flag } from "effect/unstable/cli"
 import type { ChildProcessSpawner } from "effect/unstable/process"
 
+import * as AgentCatalog from "./AgentCatalog.js"
+import * as AgentDispatch from "./AgentDispatch.js"
 import * as Api from "./Api.js"
 import * as Channel from "./Channel.js"
 import * as Config from "./Config.js"
-import * as DevinAcp from "./DevinAcp.js"
 import * as Executor from "./Executor.js"
 import * as Journal from "./Journal.js"
 import * as Policy from "./Policy.js"
@@ -20,10 +19,24 @@ const rootFlag = Flag.string("root").pipe(
   Flag.atLeast(0)
 )
 
-const tierFlag = Flag.choice("allow", ["probe", "curated", "shell"]).pipe(
-  Flag.withDescription("Capability tier granted to Sarah on this machine"),
-  Flag.withDefault("probe" as Policy.Tier)
+/**
+ * `--allow` names every widened capability: the tier (`probe`, `curated`,
+ * `shell`) and the named opt-ins (`registry-agents`). Repeatable, e.g.
+ * `--allow curated --allow registry-agents`.
+ */
+const allowFlag = Flag.choice("allow", ["probe", "curated", "shell", "registry-agents"]).pipe(
+  Flag.withDescription(
+    "Capability granted to Sarah on this machine: a tier (probe, curated, shell) and/or the registry-agents opt-in. Repeatable."
+  ),
+  Flag.atLeast(0)
 )
+
+const isTier = (value: string): value is Policy.Tier => value === "probe" || value === "curated" || value === "shell"
+
+const chosenTier = (allow: ReadonlyArray<string>, fallback: Policy.Tier): Policy.Tier => {
+  const tiers = allow.filter(isTier)
+  return tiers[tiers.length - 1] ?? fallback
+}
 
 const endpointFlag = Flag.string("endpoint").pipe(
   Flag.withDescription("Sarah API base URL"),
@@ -38,7 +51,7 @@ const effectiveRoots = (roots: ReadonlyArray<string>): ReadonlyArray<string> => 
 
 const probeCommand = Command.make("probe", { root: rootFlag }, ({ root }) =>
   Effect.gen(function*() {
-    const report = yield* Probe.probe(effectiveRoots(root))
+    const report = yield* Probe.probe(effectiveRoots(root), AgentCatalog.acpAgentInventory(Config.readConfig()))
     yield* Console.log(Probe.formatReport(report))
   })).pipe(
     Command.withDescription(
@@ -48,15 +61,24 @@ const probeCommand = Command.make("probe", { root: rootFlag }, ({ root }) =>
 
 const policyCommand = Command.make(
   "policy",
-  { root: rootFlag, allow: tierFlag },
+  { root: rootFlag, allow: allowFlag },
   ({ allow, root }) =>
     Effect.gen(function*() {
       const stored = Config.readConfig()
-      const tier = allow === "probe" ? stored.tier : allow
+      const tier = chosenTier(allow, stored.tier)
+      const registryAgents = allow.includes("registry-agents") || stored.registryAgents
       const roots = effectiveRoots(root)
-      yield* Console.log(`tier         ${tier}`)
-      yield* Console.log(`roots        ${roots.join(", ")}`)
-      yield* Console.log(`pre-approved ${stored.preApproved.join(", ") || "(none)"}`)
+      yield* Console.log(`tier            ${tier}`)
+      yield* Console.log(`roots           ${roots.join(", ")}`)
+      yield* Console.log(`pre-approved    ${stored.preApproved.join(", ") || "(none)"}`)
+      yield* Console.log(`registry-agents ${registryAgents ? "allowed" : "off"}`)
+      yield* Console.log("")
+      yield* Console.log("acp agents")
+      for (const agent of AgentCatalog.acpAgentInventory({ ...stored, tier, registryAgents })) {
+        yield* Console.log(
+          `  ${agent.id.padEnd(14)} ${(agent.version || "—").padEnd(12)} ${agent.source}`
+        )
+      }
       yield* Console.log("")
       yield* Console.log("curated allowlist")
       for (const [name, permitted] of Object.entries(Policy.curatedAllowlist)) {
@@ -96,17 +118,19 @@ const journalCommand = Command.make(
 
 const pairCommand = Command.make(
   "pair",
-  { allow: tierFlag, endpoint: endpointFlag, root: rootFlag },
+  { allow: allowFlag, endpoint: endpointFlag, root: rootFlag },
   ({ allow, endpoint, root }) =>
     Effect.gen(function*() {
       const roots = effectiveRoots(root)
       const stored = Config.readConfig()
-      Config.writeConfig({ ...stored, endpoint, roots, tier: allow })
+      const tier = chosenTier(allow, "probe")
+      const registryAgents = allow.includes("registry-agents")
+      Config.writeConfig({ ...stored, endpoint, roots, tier, registryAgents })
 
       const start = yield* Api.startPairing({
         endpoint,
         name: stored.machineName,
-        tier: allow,
+        tier,
         platform: `${process.platform}-${process.arch}`,
         agentVersion: version,
         roots
@@ -144,32 +168,7 @@ const stringArray = (value: unknown): ReadonlyArray<string> | undefined =>
     ? value
     : undefined
 
-const boundedTimeout = (value: unknown, fallback: number, maximum: number): number =>
-  typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(Math.round(value), maximum) : fallback
-
-const resolveCwd = (value: unknown, roots: ReadonlyArray<string>): string => {
-  const fallback = roots[0] ?? process.cwd()
-  if (typeof value !== "string" || value.trim() === "") {
-    return fallback
-  }
-  const absolute = path.resolve(value)
-  return roots.some((root) => Policy.withinRoot(absolute, root)) ? absolute : fallback
-}
-
-/**
- * Which ACP permission requests the local tier grants. `shell` allows any
- * tool Devin proposes; `curated` allows only read-shaped tools; `probe`
- * (and anything unrecognized) is refused. Never maps to an "always" grant.
- */
-export const devinPermissionAllowed = (tier: Policy.Tier, kind: string): boolean => {
-  if (tier === "shell") {
-    return true
-  }
-  if (tier === "curated") {
-    return ["read", "search", "fetch", "think"].includes(kind)
-  }
-  return false
-}
+const { boundedTimeout, resolveCwd } = AgentDispatch
 
 const upCommand = Command.make(
   "up",
@@ -185,15 +184,15 @@ const upCommand = Command.make(
       const roots = effectiveRoots(root)
       const target = endpoint === Config.defaultEndpoint ? stored.endpoint : endpoint
       const services = yield* Effect.context<ChildProcessSpawner.ChildProcessSpawner>()
-      const initial = yield* Probe.probe(roots)
+      const acpInventory = AgentCatalog.acpAgentInventory(stored)
+      const initial = yield* Probe.probe(roots, acpInventory)
       const policyConfig: Policy.PolicyConfig = {
         tier: stored.tier,
         roots,
         preApproved: stored.preApproved
       }
-      const devinPath = initial.codingAgents.find((agent) => agent.name === "devin" && agent.present)?.path ?? ""
 
-      /** Cancel handles for every in-flight run/devin request, by request id. */
+      /** Cancel handles for every in-flight run/agent request, by request id. */
       const active = new Map<string, () => void>()
 
       const handleRun = (requestId: string, payload: Record<string, unknown>, respond: Channel.Responder): void => {
@@ -234,70 +233,19 @@ const upCommand = Command.make(
         })
       }
 
-      const handleDevin = (requestId: string, payload: Record<string, unknown>, respond: Channel.Responder): void => {
-        const prompt = typeof payload["prompt"] === "string" ? payload["prompt"] : ""
-        if (prompt.trim() === "") {
-          respond.refused("empty_command", "no prompt was supplied")
-          return
-        }
-        if (stored.tier === "probe") {
-          Journal.append({
-            requestId,
-            argv: ["devin", "acp"],
-            cwd: roots[0] ?? process.cwd(),
-            outcome: "refused",
-            detail: "probe tier"
-          })
-          respond.refused("tier_insufficient", "this machine is paired at probe tier; only discovery is permitted")
-          return
-        }
-        if (devinPath === "") {
-          respond.exit({
-            status: "unavailable",
-            detail: "devin is not installed on this machine",
-            session_id: "",
-            duration_ms: 0,
-            truncated: false
-          })
-          return
-        }
-        const cwd = resolveCwd(payload["cwd"], roots)
-        const resumeSessionId = typeof payload["session_id"] === "string" && payload["session_id"] !== ""
-          ? payload["session_id"]
-          : undefined
-        const job = DevinAcp.start({
-          agentArgv: [devinPath, "acp"],
-          prompt,
-          cwd,
-          resumeSessionId,
-          env: process.env as Record<string, string>,
-          limits: {
-            ...DevinAcp.defaultDevinLimits,
-            timeoutMillis: boundedTimeout(payload["timeout_ms"], DevinAcp.defaultDevinLimits.timeoutMillis, 600_000)
-          },
-          onChunk: respond.chunk,
-          decidePermission: (query) => devinPermissionAllowed(stored.tier, query.kind)
+      const handleAgent = (
+        requestId: string,
+        agentId: string,
+        payload: Record<string, unknown>,
+        respond: Channel.Responder
+      ): void =>
+        AgentDispatch.handleAgentEvent(requestId, agentId, payload, respond, {
+          config: stored,
+          roots,
+          journal: Journal.append,
+          registerCancel: (id, cancel) => active.set(id, cancel),
+          unregisterCancel: (id) => active.delete(id)
         })
-        active.set(requestId, job.cancel)
-        void job.done.then((outcome) => {
-          active.delete(requestId)
-          Journal.append({
-            requestId,
-            argv: ["devin", "acp"],
-            cwd,
-            outcome: outcome.status,
-            detail: outcome.detail !== "" ? outcome.detail : `stop reason ${outcome.stopReason || "none"}`
-          })
-          respond.exit({
-            status: outcome.status,
-            stop_reason: outcome.stopReason,
-            session_id: outcome.sessionId,
-            detail: outcome.detail,
-            truncated: outcome.truncated,
-            duration_ms: outcome.durationMillis
-          })
-        })
-      }
 
       yield* Console.log(`Connecting to ${target} as "${stored.machineName}" (tier ${stored.tier}).`)
 
@@ -316,11 +264,11 @@ const upCommand = Command.make(
           },
           {
             onJoined: () =>
-              console.log(`Connected. Serving discovery, command, and Devin requests (tier ${stored.tier}).`),
+              console.log(`Connected. Serving discovery, command, and agent requests (tier ${stored.tier}).`),
             onEvent: (message) => console.log(message),
             onProbe: (requestId) =>
               Effect.runPromiseWith(services)(
-                Probe.probe(roots).pipe(
+                Probe.probe(roots, AgentCatalog.acpAgentInventory(stored)).pipe(
                   Effect.map((report) => {
                     Journal.append({
                       requestId,
@@ -334,7 +282,7 @@ const upCommand = Command.make(
                 )
               ),
             onRun: handleRun,
-            onDevin: handleDevin,
+            onAgent: handleAgent,
             onCancel: (requestId) => {
               const cancel = active.get(requestId)
               if (cancel !== undefined) {

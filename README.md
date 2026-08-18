@@ -70,6 +70,52 @@ node dist/bin.js pair --allow curated --root ~/code/my-project
 node dist/bin.js policy
 ```
 
+## Delegating to coding agents (ACP)
+
+At `curated` tier and above, Sarah can delegate work to a coding agent over the
+[Agent Client Protocol](https://agentclientprotocol.com). The controller is the
+ACP client: it spawns the agent as a subprocess (argv only, no shell), streams
+bounded progress back, and answers the agent's permission requests from the
+local tier — `probe` rejects everything, `curated` grants only read-shaped
+tools, `shell` grants what your local policy allows. Grants are always one-shot
+(`allow_once`); bypass-style options are never selected.
+
+The catalog of agents Sarah may name has three layers, in precedence order:
+
+1. **Operator config** — `agents` entries in
+   `~/.config/sarah-controller/config.json`, mapping an id to an argv and the
+   named environment variables that may pass through to it:
+
+   ```json
+   {
+     "agents": {
+       "devin": { "argv": ["devin", "acp"], "env": [] },
+       "codex": { "argv": ["codex-acp"], "env": ["OPENAI_API_KEY"] }
+     }
+   }
+   ```
+
+2. **Pinned default** — `claude` ships as a version-pinned dependency
+   (`@agentclientprotocol/claude-agent-acp`) and is spawned straight from
+   `node_modules`. A fresh install can delegate to `claude` with zero
+   configuration beyond a Claude login on the machine.
+
+3. **Registry (opt-in)** — `pair --allow curated --allow registry-agents`
+   additionally lets Sarah name any agent in the vendored snapshot of the
+   [ACP registry](https://github.com/agentclientprotocol/registry). This is
+   off by default because resolving an agent downloads and runs code: npx/uvx
+   packages are version-pinned by the snapshot, and binary distributions run
+   only when they carry a sha256 the controller can verify.
+
+The trust posture is the same as everywhere else in this controller:
+
+- agent subprocesses get the scrubbed environment; anything more is a named,
+  per-agent `env` opt-in recorded in your config — never a server-supplied value;
+- an unknown agent id is refused with `agent_not_available` and the current
+  inventory, so the server learns facts, not access;
+- `probe` reports the inventory (id, source, version, whether credentials look
+  present) without executing anything beyond fixed `--version` probes.
+
 ## What the machine refuses, always
 
 These hold at every tier, including `shell`, and the server cannot widen them:
