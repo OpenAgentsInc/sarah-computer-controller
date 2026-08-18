@@ -46,6 +46,52 @@ const refuse = (reason: RefusalReason, detail: string): Decision => ({ _tag: "Re
 const allow = (needsConfirmation: boolean): Decision => ({ _tag: "Allowed", needsConfirmation })
 
 /**
+ * Read-only `gh` invocations permitted at `curated` tier. Keyed by resource
+ * subcommand (argv[1]); the value is the set of read-only actions (argv[2])
+ * allowed for it. Anything not listed — create, edit, delete, close, merge,
+ * comment, clone, and every other mutation — is refused, so a delegated agent
+ * can inspect GitHub but never change it.
+ */
+const ghReadActions: Record<string, ReadonlyArray<string>> = {
+  issue: ["list", "view", "status"],
+  pr: ["list", "view", "status", "diff", "checks"],
+  release: ["list", "view"],
+  run: ["list", "view"],
+  workflow: ["list", "view"],
+  repo: ["list", "view"],
+  gist: ["list", "view"],
+  cache: ["list"],
+  label: ["list"],
+  ruleset: ["list", "view"],
+  auth: ["status"]
+}
+
+// `gh search …` and `gh status` are read-only in every form; `--version` too.
+const ghReadTopLevel: ReadonlyArray<string> = ["search", "status", "--version", "version"]
+
+// gh api is a GET by default but turns into a write the moment a method or a
+// field is supplied, so it is allowed only when it stays an explicit GET with
+// no field/input flags.
+const ghApiWriteFlags = ["-f", "-F", "--field", "--raw-field", "--input"]
+
+const ghApiReadOnly = (apiArgs: ReadonlyArray<string>): boolean => {
+  if (apiArgs.some((arg) => ghApiWriteFlags.includes(arg))) return false
+  const methodIndex = apiArgs.findIndex((arg) => arg === "-X" || arg === "--method")
+  if (methodIndex === -1) return true
+  const method = (apiArgs[methodIndex + 1] ?? "").toUpperCase()
+  return method === "GET" || method === "HEAD"
+}
+
+export const ghReadOnlyAllowed = (rest: ReadonlyArray<string>): boolean => {
+  const [resource, action] = rest
+  if (resource === undefined) return false
+  if (ghReadTopLevel.includes(resource)) return true
+  if (resource === "api") return ghApiReadOnly(rest.slice(1))
+  const actions = ghReadActions[resource]
+  return actions !== undefined && action !== undefined && actions.includes(action)
+}
+
+/**
  * Read-only commands the controller will run at `curated` tier. Keyed by
  * argv[0]; the value lists the subcommands or first arguments permitted, where
  * an empty list means the bare command only.
@@ -212,6 +258,16 @@ export const decide = (request: CommandRequest, config: PolicyConfig): Decision 
   }
 
   if (config.tier === "curated") {
+    // gh needs subcommand-pair awareness: `gh issue list` is a read but
+    // `gh issue create` is a write, and both share argv[1] "issue". A flat
+    // first-arg allowlist cannot separate them, so gh has its own read-only
+    // gate that whitelists (resource, action) read pairs and refuses the rest.
+    if (name === "gh") {
+      return ghReadOnlyAllowed(rest)
+        ? allow(false)
+        : refuse("not_allowlisted", `gh ${rest.join(" ")} is not a permitted read-only gh command`.trim())
+    }
+
     const permittedArguments = curatedAllowlist[name]
     if (permittedArguments === undefined) {
       return refuse("not_allowlisted", `${name} is not in the curated allowlist`)
