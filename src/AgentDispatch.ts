@@ -195,6 +195,7 @@ export const handleAgentEvent = (
         timeoutMillis: boundedTimeout(payload["timeout_ms"], AcpAgent.defaultAgentLimits.timeoutMillis, 3_600_000)
       },
       onChunk: respond.chunk,
+      onSession: respond.session,
       decidePermission: (query) =>
         AcpAgent.permissionAllowed(deps.config.tier, query, deps.config.curatedExecute, deps.roots),
       agentLabel: agentId

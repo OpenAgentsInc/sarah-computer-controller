@@ -16,6 +16,7 @@ interface Recorded {
 
 const recorder = (): Recorded => {
   const chunks: Array<string> = []
+  const sessions: Array<string> = []
   const exits: Array<Record<string, unknown>> = []
   const refusals: Array<{ reason: string; detail: string }> = []
   return {
@@ -25,6 +26,7 @@ const recorder = (): Recorded => {
     journal: [],
     respond: {
       chunk: (text) => chunks.push(text),
+      session: (id) => sessions.push(id),
       exit: (payload) => exits.push(payload),
       refused: (reason, detail) => refusals.push({ reason, detail })
     }

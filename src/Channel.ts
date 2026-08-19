@@ -14,6 +14,10 @@ type Frame = [string | null, string | null, string, string, unknown]
 /** Push-side of one in-flight request: streamed chunks and one terminal event. */
 export interface Responder {
   readonly chunk: (text: string) => void
+  /** Report the ACP session id as soon as session/new returns, so the server
+   * can checkpoint it mid-stream and a survivor can re-attach by id after a
+   * node loss (M2). */
+  readonly session: (sessionId: string) => void
   readonly exit: (payload: Record<string, unknown>) => void
   readonly refused: (reason: string, detail: string) => void
 }
@@ -105,6 +109,7 @@ export const serve = (options: ChannelOptions, handlers: ChannelHandlers): Promi
 
     const responder = (requestId: string): Responder => ({
       chunk: (t) => push(topic, "chunk", { request_id: requestId, text: t }, true),
+      session: (id) => push(topic, "session", { request_id: requestId, session_id: id }, true),
       exit: (body) => push(topic, "exit", { request_id: requestId, ...body }, true),
       refused: (reason, detail) => push(topic, "refused", { request_id: requestId, reason, detail }, true)
     })

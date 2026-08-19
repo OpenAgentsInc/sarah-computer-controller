@@ -87,6 +87,9 @@ export interface AgentRequest {
   readonly limits: AgentLimits
   /** Bounded, secret-scrubbed progress stream. */
   readonly onChunk: (text: string) => void
+  /** Called once with the ACP session id as soon as session/new returns, before
+   * streaming — lets the server checkpoint it for re-attach (M2). Optional. */
+  readonly onSession?: (sessionId: string) => void
   /** Local policy decision for `session/request_permission`. */
   readonly decidePermission: (query: PermissionQuery) => boolean
   /** Human-readable agent name used in detail messages. Defaults to "agent". */
@@ -782,6 +785,12 @@ export const start = (request: AgentRequest): AgentJob => {
       } else {
         throw failure
       }
+    }
+
+    // Report the session id upstream before we start prompting, so the server
+    // can checkpoint it and a survivor can re-attach by id after a node loss.
+    if (sessionId !== "") {
+      request.onSession?.(sessionId)
     }
 
     const result = await ctx.request(acp.methods.agent.session.prompt, {
