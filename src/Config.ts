@@ -44,6 +44,16 @@ export interface ControllerConfig {
    */
   readonly curatedExecute: ReadonlyArray<string>
   /**
+   * Operator-granted extensions to the curated-tier DIRECT `run` allowlist,
+   * keyed by argv[0] with the permitted first arguments (empty = the bare
+   * command). Symmetric with `curatedExecute` (which governs delegated ACP
+   * shells): this governs `computer_run`. Off by default; a deploy machine
+   * might set `{"gcloud": ["run", "builds", "config", "auth"]}` so
+   * `gcloud run deploy …` is permitted while `gcloud secrets …` is not. The
+   * compiled deny floor (sudo/chmod/…) still overrides everything here.
+   */
+  readonly curatedRun: Readonly<Record<string, ReadonlyArray<string>>>
+  /**
    * Explicit path to the first-party probe agent binary. Overrides the
    * pinned `@openagentsinc/probe` npm resolution; also settable via
    * `SARAH_PROBE_BIN`. Empty means "resolve the pinned package if present".
@@ -79,6 +89,7 @@ export const defaultConfig = (): ControllerConfig => ({
   agents: [],
   registryAgents: false,
   curatedExecute: [...defaultCuratedExecute],
+  curatedRun: {},
   probePath: ""
 })
 
@@ -86,6 +97,25 @@ const isTier = (value: unknown): value is Tier => value === "probe" || value ===
 
 const stringArray = (value: unknown): ReadonlyArray<string> =>
   Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []
+
+// A curated-run key is one command name; its value is the permitted first
+// arguments. Bounded (≤16 commands, ≤32 args each) and shape-validated so a
+// malformed config can never widen more than intended.
+const commandNamePattern = /^[a-z0-9][a-z0-9._-]{0,63}$/
+
+const readCuratedRun = (value: unknown): Readonly<Record<string, ReadonlyArray<string>>> => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {}
+  }
+  const out: Record<string, ReadonlyArray<string>> = {}
+  for (const [name, args] of Object.entries(value as Record<string, unknown>).slice(0, 16)) {
+    if (!commandNamePattern.test(name)) {
+      continue
+    }
+    out[name] = stringArray(args).map((entry) => entry.trim()).filter((entry) => entry !== "").slice(0, 32)
+  }
+  return out
+}
 
 const agentIdPattern = /^[a-z0-9][a-z0-9._-]{0,63}$/
 
@@ -144,6 +174,7 @@ export const readConfig = (): ControllerConfig => {
     curatedExecute: "curatedExecute" in record
       ? stringArray(record["curatedExecute"]).map((entry) => entry.trim()).filter((entry) => entry !== "").slice(0, 32)
       : fallback.curatedExecute,
+    curatedRun: readCuratedRun(record["curatedRun"]),
     probePath: typeof record["probePath"] === "string" ? record["probePath"] : fallback.probePath
   }
 }

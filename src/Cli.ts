@@ -190,7 +190,8 @@ const upCommand = Command.make(
       const policyConfig: Policy.PolicyConfig = {
         tier: stored.tier,
         roots,
-        preApproved: stored.preApproved
+        preApproved: stored.preApproved,
+        curatedRun: stored.curatedRun
       }
 
       /** Cancel handles for every in-flight run/agent request, by request id. */

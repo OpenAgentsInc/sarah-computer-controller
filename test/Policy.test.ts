@@ -84,6 +84,26 @@ describe("decide", () => {
     expect(decision).toMatchObject({ _tag: "Refused", reason: "not_allowlisted" })
   })
 
+  it("refuses gcloud by default (not in the compiled curated allowlist)", () => {
+    const decision = decide({ argv: ["gcloud", "run", "deploy"], cwd: "/home/dev/project" }, base)
+    expect(decision).toMatchObject({ _tag: "Refused", reason: "not_allowlisted" })
+  })
+
+  it("allows an operator-granted curatedRun command, subcommand-scoped", () => {
+    const deployer: PolicyConfig = { ...base, curatedRun: { gcloud: ["run", "builds", "config", "auth"] } }
+    expect(decide({ argv: ["gcloud", "run", "deploy", "svc"], cwd: "/home/dev/project" }, deployer))
+      .toEqual({ _tag: "Allowed", needsConfirmation: false })
+    // The grant is scoped: a subcommand outside the list stays refused.
+    expect(decide({ argv: ["gcloud", "secrets", "versions", "access"], cwd: "/home/dev/project" }, deployer))
+      .toMatchObject({ _tag: "Refused", reason: "not_allowlisted" })
+  })
+
+  it("a curatedRun grant never overrides the compiled deny floor", () => {
+    const reckless: PolicyConfig = { ...base, curatedRun: { sudo: [] } }
+    expect(decide({ argv: ["sudo", "ls"], cwd: "/home/dev/project" }, reckless))
+      .toMatchObject({ _tag: "Refused", reason: "denied_command" })
+  })
+
   it("allows read-only gh commands at curated tier", () => {
     for (
       const argv of [

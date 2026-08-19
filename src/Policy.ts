@@ -21,6 +21,13 @@ export interface PolicyConfig {
   readonly roots: ReadonlyArray<string>
   /** argv[0] values pre-approved by the operator for the `shell` tier. */
   readonly preApproved: ReadonlyArray<string>
+  /**
+   * Operator-granted extensions to the compiled `curatedAllowlist`, keyed by
+   * argv[0] with permitted first arguments (same shape/semantics as
+   * `curatedAllowlist`). Lets a specific machine run e.g. `gcloud run …`
+   * without a global code change. The compiled deny floor still overrides it.
+   */
+  readonly curatedRun?: Readonly<Record<string, ReadonlyArray<string>>>
 }
 
 export interface CommandRequest {
@@ -268,7 +275,11 @@ export const decide = (request: CommandRequest, config: PolicyConfig): Decision 
         : refuse("not_allowlisted", `gh ${rest.join(" ")} is not a permitted read-only gh command`.trim())
     }
 
-    const permittedArguments = curatedAllowlist[name]
+    // Compiled read-only allowlist, then the operator's per-machine grants
+    // (curatedRun) — a command already denied by the compiled floor above
+    // never reaches here, so an operator grant can only widen the read set,
+    // never override a denial.
+    const permittedArguments = curatedAllowlist[name] ?? config.curatedRun?.[name]
     if (permittedArguments === undefined) {
       return refuse("not_allowlisted", `${name} is not in the curated allowlist`)
     }
