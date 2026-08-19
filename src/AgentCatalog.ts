@@ -49,6 +49,7 @@ export interface CatalogEntry {
 const require_ = createRequire(import.meta.url)
 
 const claudeAdapterPackage = "@agentclientprotocol/claude-agent-acp"
+const probePackage = "@openagentsinc/probe"
 
 interface PinnedAdapter {
   readonly version: string
@@ -69,6 +70,36 @@ export const resolvePinnedClaudeAdapter = (): PinnedAdapter | undefined => {
       ? record["bin"] as Record<string, unknown>
       : {}
     const relative = typeof bin["claude-agent-acp"] === "string" ? bin["claude-agent-acp"] : "dist/index.js"
+    return {
+      version: typeof record["version"] === "string" ? record["version"] : "",
+      binPath: path.join(path.dirname(packageJsonPath), relative)
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Locate the pinned first-party probe agent. Probe is the platform-neutral
+ * `@openagentsinc/probe` npm package (a wasm core with an async, non-JSPI
+ * ABI); it is spawned from `node_modules` under the controller's own Node,
+ * exactly like the claude adapter, with no PATH or network dependency. An
+ * explicit path (config `probePath` or `SARAH_PROBE_BIN`) wins — useful
+ * before the package is published and for local development.
+ */
+export const resolvePinnedProbeAgent = (probePath?: string): PinnedAdapter | undefined => {
+  const override = probePath ?? process.env["SARAH_PROBE_BIN"]
+  if (override !== undefined && override !== "" && fs.existsSync(override)) {
+    return { version: "", binPath: override }
+  }
+  try {
+    const packageJsonPath = require_.resolve(`${probePackage}/package.json`)
+    const parsed: unknown = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"))
+    const record = typeof parsed === "object" && parsed !== null ? parsed as Record<string, unknown> : {}
+    const bin = typeof record["bin"] === "object" && record["bin"] !== null
+      ? record["bin"] as Record<string, unknown>
+      : {}
+    const relative = typeof bin["probe"] === "string" ? bin["probe"] : "bin/probe.mjs"
     return {
       version: typeof record["version"] === "string" ? record["version"] : "",
       binPath: path.join(path.dirname(packageJsonPath), relative)
@@ -148,6 +179,25 @@ export const buildCatalog = (config: ControllerConfig): ReadonlyArray<CatalogEnt
       version: "",
       authReady: configAuthReady(entry)
     })
+  }
+
+  // The first-party probe agent, pinned like claude. It needs NO machine
+  // credential — authority arrives per delegation as a Sarah inference grant
+  // injected at spawn — so its auth is ready on every paired machine. That is
+  // exactly what "a free coding agent for every Sarah user" requires.
+  if (!seen.has("probe")) {
+    const pinned = resolvePinnedProbeAgent(config.probePath)
+    if (pinned !== undefined) {
+      seen.add("probe")
+      entries.push({
+        id: "probe",
+        source: "pinned",
+        argv: [process.execPath, pinned.binPath, "acp"],
+        envPassthrough: [],
+        version: pinned.version,
+        authReady: true
+      })
+    }
   }
 
   if (!seen.has("claude")) {

@@ -59,8 +59,29 @@ const secretPatterns: ReadonlyArray<RegExp> = [
   /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g
 ]
 
-export const scrubSecrets = (text: string): string =>
-  secretPatterns.reduce((accumulator, pattern) => accumulator.replace(pattern, "[redacted]"), text)
+/**
+ * Exact secret values registered at runtime — e.g. a Sarah inference grant
+ * injected for a delegation. Pattern matching cannot know a grant token's
+ * shape, so the value is registered here and masked like any other secret
+ * before output leaves the machine.
+ */
+const runtimeSecrets = new Set<string>()
+
+/** Register an exact secret value so scrubSecrets masks it. Short values are
+ * ignored to avoid masking innocuous substrings. */
+export const registerRuntimeSecret = (value: string): void => {
+  if (value.length >= 8) {
+    runtimeSecrets.add(value)
+  }
+}
+
+export const scrubSecrets = (text: string): string => {
+  let out = secretPatterns.reduce((accumulator, pattern) => accumulator.replace(pattern, "[redacted]"), text)
+  for (const secret of runtimeSecrets) {
+    out = out.split(secret).join("[redacted]")
+  }
+  return out
+}
 
 const decoder = new TextDecoder()
 

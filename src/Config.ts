@@ -43,6 +43,12 @@ export interface ControllerConfig {
    * recorded 2026-08-17 so delegated agents can use `gh`.
    */
   readonly curatedExecute: ReadonlyArray<string>
+  /**
+   * Explicit path to the first-party probe agent binary. Overrides the
+   * pinned `@openagentsinc/probe` npm resolution; also settable via
+   * `SARAH_PROBE_BIN`. Empty means "resolve the pinned package if present".
+   */
+  readonly probePath: string
 }
 
 export const defaultEndpoint = "https://stage.openagents.com"
@@ -72,7 +78,8 @@ export const defaultConfig = (): ControllerConfig => ({
   machineId: "",
   agents: [],
   registryAgents: false,
-  curatedExecute: [...defaultCuratedExecute]
+  curatedExecute: [...defaultCuratedExecute],
+  probePath: ""
 })
 
 const isTier = (value: unknown): value is Tier => value === "probe" || value === "curated" || value === "shell"
@@ -136,7 +143,8 @@ export const readConfig = (): ControllerConfig => {
     registryAgents: record["registryAgents"] === true,
     curatedExecute: "curatedExecute" in record
       ? stringArray(record["curatedExecute"]).map((entry) => entry.trim()).filter((entry) => entry !== "").slice(0, 32)
-      : fallback.curatedExecute
+      : fallback.curatedExecute,
+    probePath: typeof record["probePath"] === "string" ? record["probePath"] : fallback.probePath
   }
 }
 

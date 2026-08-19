@@ -18,7 +18,47 @@ import * as AcpAgent from "./AcpAgent.js"
 import * as AgentCatalog from "./AgentCatalog.js"
 import type { Responder } from "./Channel.js"
 import type { ControllerConfig } from "./Config.js"
+import { registerRuntimeSecret } from "./Executor.js"
 import * as Policy from "./Policy.js"
+
+/**
+ * The first-party agent id whose delegations may receive a server-supplied,
+ * delegation-scoped inference grant at spawn. This is the ONE deliberate
+ * narrowing of the "env passthrough is never a server-supplied value" rule:
+ * that rule exists so the server cannot exfiltrate or plant OPERATOR
+ * secrets; a Sarah-minted grant is not an operator secret but per-run
+ * authority — generation-fenced, budgeted, and useless beyond the
+ * delegation. No other agent id is eligible.
+ */
+export const grantEligibleAgentId = "probe"
+
+/**
+ * Build the env additions for a first-party probe delegation: the
+ * delegation-scoped grant token and the endpoint URL it authorizes. Returns
+ * an empty record for any other agent, or when the payload carries no grant.
+ * The grant value is registered with the secret scrubber so it can never
+ * appear in streamed output, journal entries, or the durable record.
+ */
+export const grantEnvironment = (
+  agentId: string,
+  payload: Record<string, unknown>
+): Record<string, string> => {
+  if (agentId !== grantEligibleAgentId) {
+    return {}
+  }
+  const grant = typeof payload["inference_grant"] === "string" ? payload["inference_grant"] : ""
+  const url = typeof payload["inference_url"] === "string" ? payload["inference_url"] : ""
+  if (grant === "") {
+    return {}
+  }
+  registerRuntimeSecret(grant)
+  const env: Record<string, string> = { PROBE_INFERENCE_GRANT: grant }
+  if (url !== "") {
+    env["PROBE_INFERENCE_URL"] = url
+    env["PROBE_TRANSPORT"] = "openai"
+  }
+  return env
+}
 
 export const boundedTimeout = (value: unknown, fallback: number, maximum: number): number =>
   typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(Math.round(value), maximum) : fallback
@@ -140,12 +180,16 @@ export const handleAgentEvent = (
     : undefined
 
   const launch = (entry: AgentCatalog.CatalogEntry): void => {
+    // First-party probe delegations receive the delegation-scoped inference
+    // grant at spawn (see grantEnvironment). It is injected on top of the
+    // scrubbed passthrough env — never mixed into the operator-opt-in path.
+    const grantEnv = grantEnvironment(entry.id, payload)
     const job = start({
       agentArgv: entry.argv,
       prompt,
       cwd,
       resumeSessionId,
-      env: AgentCatalog.agentEnvironment(entry.envPassthrough),
+      env: { ...AgentCatalog.agentEnvironment(entry.envPassthrough), ...grantEnv },
       limits: {
         ...AcpAgent.defaultAgentLimits,
         timeoutMillis: boundedTimeout(payload["timeout_ms"], AcpAgent.defaultAgentLimits.timeoutMillis, 3_600_000)
