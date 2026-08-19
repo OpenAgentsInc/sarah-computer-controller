@@ -66,6 +66,10 @@ export interface AgentOutcome {
   readonly agentCapabilities: Record<string, unknown>
   /** Agent-advertised auth methods, recorded for Sarah-side evidence. */
   readonly authMethods: ReadonlyArray<AuthMethodSummary>
+  /** Effective values returned by the ACP session, not merely requested config. */
+  readonly model: string
+  readonly reasoningEffort: string
+  readonly mode: string
 }
 
 export interface PermissionQuery {
@@ -99,6 +103,28 @@ export interface AgentRequest {
 export interface AgentJob {
   readonly done: Promise<AgentOutcome>
   readonly cancel: () => void
+}
+
+export interface AgentRuntime {
+  readonly model: string
+  readonly reasoningEffort: string
+  readonly mode: string
+}
+
+/** Extract the effective runtime selected by an ACP agent for a new/loaded session. */
+export const sessionRuntime = (
+  response: Pick<acp.NewSessionResponse, "configOptions" | "modes">
+): AgentRuntime => {
+  const options = response.configOptions ?? []
+  const selected = (category: string, id: string): string => {
+    const option = options.find((entry) => entry.category === category || entry.id === id)
+    return option !== undefined && typeof option.currentValue === "string" ? option.currentValue : ""
+  }
+  return {
+    model: selected("model", "model"),
+    reasoningEffort: selected("thought_level", "reasoning_effort"),
+    mode: response.modes?.currentModeId ?? selected("mode", "mode")
+  }
 }
 
 /**
@@ -554,6 +580,7 @@ export const start = (request: AgentRequest): AgentJob => {
   let outputText = ""
   let agentCapabilities: Record<string, unknown> = {}
   let authMethods: ReadonlyArray<AuthMethodSummary> = []
+  let runtime: AgentRuntime = { model: "", reasoningEffort: "", mode: "" }
   let connection: acp.ClientContext | undefined
   let resolveDone: (outcome: AgentOutcome) => void
   const done = new Promise<AgentOutcome>((resolve) => {
@@ -572,7 +599,10 @@ export const start = (request: AgentRequest): AgentJob => {
         durationMillis: Date.now() - startedAt,
         detail: `${label} is not installed`,
         agentCapabilities: {},
-        authMethods: []
+        authMethods: [],
+        model: "",
+        reasoningEffort: "",
+        mode: ""
       }), 0)
     return { done, cancel: () => undefined }
   }
@@ -610,7 +640,10 @@ export const start = (request: AgentRequest): AgentJob => {
       truncated,
       durationMillis: Date.now() - startedAt,
       agentCapabilities,
-      authMethods
+      authMethods,
+      model: runtime.model,
+      reasoningEffort: runtime.reasoningEffort,
+      mode: runtime.mode
     })
   }
 
@@ -751,17 +784,19 @@ export const start = (request: AgentRequest): AgentJob => {
 
     const createSession = async (): Promise<string> => {
       if (resuming && request.resumeSessionId !== undefined) {
-        await ctx.request(acp.methods.agent.session.load, {
+        const loaded = await ctx.request(acp.methods.agent.session.load, {
           sessionId: request.resumeSessionId,
           cwd: request.cwd,
           mcpServers: []
         })
+        runtime = sessionRuntime(loaded)
         return request.resumeSessionId
       }
       const created = await ctx.request(acp.methods.agent.session.new, {
         cwd: request.cwd,
         mcpServers: []
       })
+      runtime = sessionRuntime(created)
       return created.sessionId
     }
 
@@ -791,6 +826,14 @@ export const start = (request: AgentRequest): AgentJob => {
     // can checkpoint it and a survivor can re-attach by id after a node loss.
     if (sessionId !== "") {
       request.onSession?.(sessionId)
+    }
+    const runtimeParts = [
+      runtime.model !== "" ? `model ${runtime.model}` : "",
+      runtime.reasoningEffort !== "" ? `reasoning ${runtime.reasoningEffort}` : "",
+      runtime.mode !== "" ? `mode ${runtime.mode}` : ""
+    ].filter((value) => value !== "")
+    if (runtimeParts.length > 0) {
+      emitStream(noteFrame(`Agent runtime: ${runtimeParts.join(", ")}`, "info"))
     }
 
     const result = await ctx.request(acp.methods.agent.session.prompt, {

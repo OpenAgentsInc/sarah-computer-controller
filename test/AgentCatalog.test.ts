@@ -45,11 +45,23 @@ describe("buildCatalog", () => {
 
   it("includes operator-configured agents", () => {
     const catalog = AgentCatalog.buildCatalog(
-      config({ agents: [{ id: "codex", argv: ["codex-acp"], env: [] }] })
+      config({
+        agents: [{
+          id: "codex",
+          argv: ["codex-acp"],
+          env: [],
+          model: "gpt-5.6-sol",
+          reasoningEffort: "medium",
+          mode: "agent-full-access"
+        }]
+      })
     )
     const codex = catalog.find((entry) => entry.id === "codex")
     expect(codex?.source).toBe("config")
     expect(codex?.argv).toEqual(["codex-acp"])
+    expect(codex?.model).toBe("gpt-5.6-sol")
+    expect(codex?.reasoningEffort).toBe("medium")
+    expect(codex?.mode).toBe("agent-full-access")
   })
 })
 
@@ -125,6 +137,23 @@ describe("agentEnvironment", () => {
     expect(env["ANTHROPIC_API_KEY"]).toBe("sk-ant-secret")
     expect(env["GITHUB_TOKEN"]).toBeUndefined()
   })
+
+  it("maps explicit ACP runtime settings to codex-acp without changing normal defaults when absent", () => {
+    const defaults = AgentCatalog.agentEnvironment([], { PATH: "/usr/bin", HOME: "/home/x" })
+    expect(defaults["CODEX_CONFIG"]).toBeUndefined()
+    expect(defaults["INITIAL_AGENT_MODE"]).toBeUndefined()
+
+    const configured = AgentCatalog.agentEnvironment(
+      [],
+      { PATH: "/usr/bin", HOME: "/home/x" },
+      { model: "gpt-5.6-sol", reasoningEffort: "medium", mode: "agent-full-access" }
+    )
+    expect(JSON.parse(configured["CODEX_CONFIG"] ?? "{}")).toEqual({
+      model: "gpt-5.6-sol",
+      model_reasoning_effort: "medium"
+    })
+    expect(configured["INITIAL_AGENT_MODE"]).toBe("agent-full-access")
+  })
 })
 
 describe("acpAgentInventory", () => {
@@ -132,7 +161,15 @@ describe("acpAgentInventory", () => {
     const inventory = AgentCatalog.acpAgentInventory(config())
     expect(inventory.length).toBeGreaterThan(0)
     for (const entry of inventory) {
-      expect(Object.keys(entry).sort()).toEqual(["auth_ready", "id", "source", "version"])
+      expect(Object.keys(entry).sort()).toEqual([
+        "auth_ready",
+        "id",
+        "mode",
+        "model",
+        "reasoning_effort",
+        "source",
+        "version"
+      ])
       expect(["pinned", "config", "registry"]).toContain(entry.source)
       expect([true, false, null]).toContain(entry.auth_ready)
       expect(typeof entry.version).toBe("string")
@@ -162,11 +199,24 @@ describe("acpAgentInventory", () => {
 describe("readAgentEntries", () => {
   it("normalizes the on-disk agents object and drops malformed entries", () => {
     const entries = readAgentEntries({
-      devin: { argv: ["devin", "acp"], env: ["DEVIN_API_KEY"] },
+      devin: {
+        argv: ["devin", "acp"],
+        env: ["DEVIN_API_KEY"],
+        model: "gpt-5.6-sol",
+        reasoningEffort: "high",
+        mode: "agent-full-access"
+      },
       "no-argv": { env: ["X"] },
       "Bad Id!": { argv: ["x"] },
       wrongShape: "nope"
     })
-    expect(entries).toEqual([{ id: "devin", argv: ["devin", "acp"], env: ["DEVIN_API_KEY"] }])
+    expect(entries).toEqual([{
+      id: "devin",
+      argv: ["devin", "acp"],
+      env: ["DEVIN_API_KEY"],
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      mode: "agent-full-access"
+    }])
   })
 })

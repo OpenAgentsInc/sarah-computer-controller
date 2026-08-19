@@ -20,6 +20,12 @@ export interface AgentConfigEntry {
   readonly id: string
   readonly argv: ReadonlyArray<string>
   readonly env: ReadonlyArray<string>
+  /** Optional ACP model override. Empty/absent preserves the agent's normal default. */
+  readonly model?: string
+  /** Optional reasoning-effort override. Empty/absent preserves the agent's normal default. */
+  readonly reasoningEffort?: string
+  /** Optional approval/sandbox preset understood by adapters such as codex-acp. */
+  readonly mode?: "read-only" | "agent" | "agent-full-access"
 }
 
 export interface ControllerConfig {
@@ -118,6 +124,17 @@ const readCuratedRun = (value: unknown): Readonly<Record<string, ReadonlyArray<s
 }
 
 const agentIdPattern = /^[a-z0-9][a-z0-9._-]{0,63}$/
+const modelIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/
+const reasoningEfforts = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+
+const optionalModel = (value: unknown): string | undefined =>
+  typeof value === "string" && modelIdPattern.test(value) ? value : undefined
+
+const optionalReasoningEffort = (value: unknown): string | undefined =>
+  typeof value === "string" && reasoningEfforts.has(value) ? value : undefined
+
+const optionalAgentMode = (value: unknown): AgentConfigEntry["mode"] =>
+  value === "read-only" || value === "agent" || value === "agent-full-access" ? value : undefined
 
 /**
  * Normalize the on-disk `agents` object (`{ "devin": { "argv": [...], "env":
@@ -138,7 +155,17 @@ export const readAgentEntries = (value: unknown): ReadonlyArray<AgentConfigEntry
     if (argv.length === 0) {
       continue
     }
-    entries.push({ id, argv, env: stringArray(body["env"]) })
+    const model = optionalModel(body["model"])
+    const reasoningEffort = optionalReasoningEffort(body["reasoningEffort"])
+    const mode = optionalAgentMode(body["mode"])
+    entries.push({
+      id,
+      argv,
+      env: stringArray(body["env"]),
+      ...(model !== undefined ? { model } : {}),
+      ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+      ...(mode !== undefined ? { mode } : {})
+    })
   }
   return entries
 }
@@ -146,7 +173,13 @@ export const readAgentEntries = (value: unknown): ReadonlyArray<AgentConfigEntry
 const writeAgentEntries = (agents: ReadonlyArray<AgentConfigEntry>): Record<string, unknown> => {
   const out: Record<string, unknown> = {}
   for (const entry of agents) {
-    out[entry.id] = { argv: entry.argv, env: entry.env }
+    out[entry.id] = {
+      argv: entry.argv,
+      env: entry.env,
+      ...(entry.model !== undefined ? { model: entry.model } : {}),
+      ...(entry.reasoningEffort !== undefined ? { reasoningEffort: entry.reasoningEffort } : {}),
+      ...(entry.mode !== undefined ? { mode: entry.mode } : {})
+    }
   }
   return out
 }

@@ -19,8 +19,24 @@ const report: ProbeReport = {
   toolchains: [{ name: "git", present: true, path: "/usr/bin/git", version: "git version 2.49.0" }],
   roots: ["/tmp"],
   acpAgents: [
-    { id: "claude", source: "pinned", version: "0.69.0", auth_ready: true },
-    { id: "devin", source: "config", version: "", auth_ready: null }
+    {
+      id: "claude",
+      source: "pinned",
+      version: "0.69.0",
+      auth_ready: true,
+      model: null,
+      reasoning_effort: null,
+      mode: null
+    },
+    {
+      id: "devin",
+      source: "config",
+      version: "",
+      auth_ready: null,
+      model: null,
+      reasoning_effort: null,
+      mode: null
+    }
   ]
 }
 
@@ -29,8 +45,24 @@ describe("wireReport", () => {
     const wire = wireReport(report)
     expect(wire["schema"]).toBe("sarah.computer_probe.v1")
     expect(wire["acp_agents"]).toEqual([
-      { id: "claude", source: "pinned", version: "0.69.0", auth_ready: true },
-      { id: "devin", source: "config", version: "", auth_ready: null }
+      {
+        id: "claude",
+        source: "pinned",
+        version: "0.69.0",
+        auth_ready: true,
+        model: null,
+        reasoning_effort: null,
+        mode: null
+      },
+      {
+        id: "devin",
+        source: "config",
+        version: "",
+        auth_ready: null,
+        model: null,
+        reasoning_effort: null,
+        mode: null
+      }
     ])
   })
 })

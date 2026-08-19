@@ -50,6 +50,9 @@ const outcome = (overrides: Partial<AgentOutcome> = {}): AgentOutcome => ({
   detail: "",
   agentCapabilities: {},
   authMethods: [],
+  model: "gpt-test",
+  reasoningEffort: "medium",
+  mode: "agent",
   ...overrides
 })
 

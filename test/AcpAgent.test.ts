@@ -252,6 +252,36 @@ describe("permissionAllowed", () => {
   })
 })
 
+describe("sessionRuntime", () => {
+  it("reports the effective model, reasoning effort, and mode selected by the agent", () => {
+    expect(AcpAgent.sessionRuntime({
+      modes: { currentModeId: "agent-full-access", availableModes: [] },
+      configOptions: [
+        {
+          id: "model",
+          name: "Model",
+          category: "model",
+          type: "select",
+          currentValue: "gpt-5.6-sol",
+          options: []
+        },
+        {
+          id: "reasoning_effort",
+          name: "Reasoning",
+          category: "thought_level",
+          type: "select",
+          currentValue: "medium",
+          options: []
+        }
+      ]
+    })).toEqual({ model: "gpt-5.6-sol", reasoningEffort: "medium", mode: "agent-full-access" })
+  })
+
+  it("stays honest when an agent does not expose runtime configuration", () => {
+    expect(AcpAgent.sessionRuntime({})).toEqual({ model: "", reasoningEffort: "", mode: "" })
+  })
+})
+
 describe("selectPermissionOption", () => {
   const option = (optionId: string, kind: PermissionOptionKind, name = optionId) => ({ optionId, kind, name })
 

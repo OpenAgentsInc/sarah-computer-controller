@@ -156,7 +156,12 @@ const formatTool = (tool: ToolReport): string =>
 
 const formatAcpAgent = (agent: AcpAgentInventoryEntry): string => {
   const auth = agent.auth_ready === true ? "auth ready" : agent.auth_ready === false ? "auth missing" : "auth unknown"
-  return `  ${agent.id.padEnd(14)} ${(agent.version || "—").padEnd(12)} ${agent.source.padEnd(8)} ${auth}`
+  const runtime = [
+    agent.model !== null ? `model ${agent.model}` : "model default",
+    agent.reasoning_effort !== null ? `reasoning ${agent.reasoning_effort}` : "reasoning default",
+    agent.mode !== null ? `mode ${agent.mode}` : "mode default"
+  ].join(", ")
+  return `  ${agent.id.padEnd(14)} ${(agent.version || "—").padEnd(12)} ${agent.source.padEnd(8)} ${auth}; ${runtime}`
 }
 
 export const formatReport = (report: ProbeReport): string => {

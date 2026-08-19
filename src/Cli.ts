@@ -77,15 +77,21 @@ const policyCommand = Command.make(
       yield* Console.log("acp agents")
       for (const agent of AgentCatalog.acpAgentInventory({ ...stored, tier, registryAgents })) {
         yield* Console.log(
-          `  ${agent.id.padEnd(14)} ${(agent.version || "—").padEnd(12)} ${agent.source}`
+          `  ${agent.id.padEnd(14)} ${(agent.version || "—").padEnd(12)} ${agent.source} ` +
+            `model=${agent.model ?? "default"} reasoning=${agent.reasoning_effort ?? "default"} ` +
+            `mode=${agent.mode ?? "default"}`
         )
       }
       yield* Console.log("")
-      yield* Console.log("curated allowlist")
-      for (const [name, permitted] of Object.entries(Policy.curatedAllowlist)) {
-        yield* Console.log(
-          `  ${name.padEnd(10)} ${permitted.length === 0 ? "(any read-only invocation)" : permitted.join(" ")}`
-        )
+      if (tier === "shell") {
+        yield* Console.log("ACP permissions  all requested tools allowed")
+      } else {
+        yield* Console.log("curated allowlist")
+        for (const [name, permitted] of Object.entries(Policy.curatedAllowlist)) {
+          yield* Console.log(
+            `  ${name.padEnd(10)} ${permitted.length === 0 ? "(any read-only invocation)" : permitted.join(" ")}`
+          )
+        }
       }
     })
 ).pipe(Command.withDescription("Show the effective tier, roots, and command allowlist"))
@@ -98,6 +104,12 @@ const statusCommand = Command.make("status", {}, () =>
     yield* Console.log(`tier      ${config.tier}`)
     yield* Console.log(`roots     ${config.roots.join(", ") || "(none declared)"}`)
     yield* Console.log(`paired    ${Config.hasToken() ? "yes" : "no"}`)
+    for (const agent of AgentCatalog.acpAgentInventory(config)) {
+      yield* Console.log(
+        `agent     ${agent.id} model=${agent.model ?? "default"} ` +
+          `reasoning=${agent.reasoning_effort ?? "default"} mode=${agent.mode ?? "default"}`
+      )
+    }
     yield* Console.log(`journal   ${Journal.journalPath()}`)
   })).pipe(Command.withDescription("Show pairing state and where local files live"))
 

@@ -4,7 +4,7 @@
  * for the terminal payload:
  *
  *   { status, stop_reason, session_id, output, truncated, duration_ms,
- *     detail, agent_id }
+ *     detail, agent_id, model, reasoning_effort, mode }
  *
  * with status in completed|refused|cancelled|timeout|unavailable|failed. An
  * unknown agent id refuses with status "refused" and a detail naming
@@ -104,7 +104,10 @@ const agentExit = (respond: Responder, agentId: string, outcome: AcpAgent.AgentO
     truncated: outcome.truncated,
     duration_ms: outcome.durationMillis,
     detail: outcome.detail.slice(0, maximumDetailLength),
-    agent_id: agentId
+    agent_id: agentId,
+    model: outcome.model,
+    reasoning_effort: outcome.reasoningEffort,
+    mode: outcome.mode
   })
 }
 
@@ -120,7 +123,10 @@ const emptyOutcome = (
   durationMillis: 0,
   detail,
   agentCapabilities: {},
-  authMethods: []
+  authMethods: [],
+  model: "",
+  reasoningEffort: "",
+  mode: ""
 })
 
 export const agentNotAvailableDetail = (
@@ -192,7 +198,7 @@ export const handleAgentEvent = (
       prompt,
       cwd,
       resumeSessionId,
-      env: { ...AgentCatalog.agentEnvironment(entry.envPassthrough), ...grantEnv },
+      env: { ...AgentCatalog.agentEnvironment(entry.envPassthrough, process.env, entry), ...grantEnv },
       limits: {
         ...AcpAgent.defaultAgentLimits,
         timeoutMillis: boundedTimeout(payload["timeout_ms"], AcpAgent.defaultAgentLimits.timeoutMillis, 3_600_000)

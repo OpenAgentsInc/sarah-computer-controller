@@ -44,6 +44,10 @@ export interface CatalogEntry {
   readonly version: string
   /** Whether the agent's login/credential looks present. null = cannot cheaply tell. */
   readonly authReady: boolean | null
+  /** Operator-selected ACP runtime overrides; absent means use the adapter's normal default. */
+  readonly model?: string
+  readonly reasoningEffort?: string
+  readonly mode?: "read-only" | "agent" | "agent-full-access"
 }
 
 const require_ = createRequire(import.meta.url)
@@ -177,7 +181,10 @@ export const buildCatalog = (config: ControllerConfig): ReadonlyArray<CatalogEnt
       argv: entry.argv,
       envPassthrough: entry.env,
       version: "",
-      authReady: configAuthReady(entry)
+      authReady: configAuthReady(entry),
+      ...(entry.model !== undefined ? { model: entry.model } : {}),
+      ...(entry.reasoningEffort !== undefined ? { reasoningEffort: entry.reasoningEffort } : {}),
+      ...(entry.mode !== undefined ? { mode: entry.mode } : {})
     })
   }
 
@@ -424,7 +431,8 @@ export const prepareRegistryBinary = async (
  */
 export const agentEnvironment = (
   envPassthrough: ReadonlyArray<string>,
-  source: Record<string, string | undefined> = process.env
+  source: Record<string, string | undefined> = process.env,
+  runtime: Pick<CatalogEntry, "model" | "reasoningEffort" | "mode"> = {}
 ): Record<string, string> => {
   const env = scrubbedEnvironment(source)
   for (const name of envPassthrough) {
@@ -432,6 +440,19 @@ export const agentEnvironment = (
     if (value !== undefined) {
       env[name] = value
     }
+  }
+  const codexConfig: Record<string, string> = {}
+  if (runtime.model !== undefined && runtime.model !== "") {
+    codexConfig["model"] = runtime.model
+  }
+  if (runtime.reasoningEffort !== undefined && runtime.reasoningEffort !== "") {
+    codexConfig["model_reasoning_effort"] = runtime.reasoningEffort
+  }
+  if (Object.keys(codexConfig).length > 0) {
+    env["CODEX_CONFIG"] = JSON.stringify(codexConfig)
+  }
+  if (runtime.mode !== undefined) {
+    env["INITIAL_AGENT_MODE"] = runtime.mode
   }
   return env
 }
@@ -445,6 +466,9 @@ export interface AcpAgentInventoryEntry {
   readonly source: CatalogSource
   readonly version: string
   readonly auth_ready: boolean | null
+  readonly model: string | null
+  readonly reasoning_effort: string | null
+  readonly mode: string | null
 }
 
 /**
@@ -458,7 +482,10 @@ export const acpAgentInventory = (config: ControllerConfig): ReadonlyArray<AcpAg
     id: entry.id,
     source: entry.source,
     version: entry.version.slice(0, maximumVersionLength),
-    auth_ready: entry.authReady
+    auth_ready: entry.authReady,
+    model: entry.model ?? null,
+    reasoning_effort: entry.reasoningEffort ?? null,
+    mode: entry.mode ?? null
   }))
   if (config.registryAgents) {
     const seen = new Set(entries.map((entry) => entry.id))
@@ -474,7 +501,10 @@ export const acpAgentInventory = (config: ControllerConfig): ReadonlyArray<AcpAg
         id: agent.id,
         source: "registry",
         version: agent.version.slice(0, maximumVersionLength),
-        auth_ready: null
+        auth_ready: null,
+        model: null,
+        reasoning_effort: null,
+        mode: null
       })
     }
   }

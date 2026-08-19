@@ -91,10 +91,25 @@ The catalog of agents Sarah may name has three layers, in precedence order:
    {
      "agents": {
        "devin": { "argv": ["devin", "acp"], "env": [] },
-       "codex": { "argv": ["codex-acp"], "env": ["OPENAI_API_KEY"] }
+       "codex": {
+         "argv": ["codex-acp"],
+         "env": ["OPENAI_API_KEY"],
+         "model": "gpt-5.6-sol",
+         "reasoningEffort": "medium",
+         "mode": "agent-full-access"
+       }
      }
    }
    ```
+
+   `model` and `reasoningEffort` are optional; omitting them preserves the
+   adapter and local Codex defaults. `mode` is also optional and accepts
+   `read-only`, `agent`, or `agent-full-access`. The full-access mode runs
+   Codex with approval policy `never`, a danger-full-access sandbox, and
+   network access. Pair the controller at `shell` tier when every ACP
+   permission request should also be granted instead of checked against the
+   curated command list. The effective model, reasoning effort, and mode
+   returned by the ACP session are included in the terminal result.
 
 2. **Pinned default** — `claude` ships as a version-pinned dependency
    (`@agentclientprotocol/claude-agent-acp`) and is spawned straight from
