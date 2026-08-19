@@ -86,6 +86,9 @@ export interface AgentDispatchDeps {
   readonly journal: (entry: JournalEntryInput) => void
   readonly registerCancel: (requestId: string, cancel: () => void) => void
   readonly unregisterCancel: (requestId: string) => void
+  /** Register the whole agent job so it can be kept alive across a WS drop and
+   * re-attached by session id (M2). Optional — falls back to registerCancel. */
+  readonly registerAgentJob?: (requestId: string, job: AcpAgent.AgentJob) => void
   /** Injectable for tests; defaults to the real ACP client. */
   readonly startJob?: (request: AcpAgent.AgentRequest) => AcpAgent.AgentJob
 }
@@ -201,6 +204,7 @@ export const handleAgentEvent = (
       agentLabel: agentId
     })
     deps.registerCancel(requestId, job.cancel)
+    deps.registerAgentJob?.(requestId, job)
     void job.done.then((outcome) => {
       deps.unregisterCancel(requestId)
       deps.journal({

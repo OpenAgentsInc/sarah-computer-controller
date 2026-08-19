@@ -11,6 +11,7 @@ import * as Executor from "./Executor.js"
 import * as Journal from "./Journal.js"
 import * as Policy from "./Policy.js"
 import * as Probe from "./Probe.js"
+import { makeSink, SessionKeeper } from "./SessionKeeper.js"
 
 const version = "0.1.0"
 
@@ -193,7 +194,10 @@ const upCommand = Command.make(
       }
 
       /** Cancel handles for every in-flight run/agent request, by request id. */
-      const active = new Map<string, () => void>()
+      // Persists across reconnects (it lives here, outside Channel.serve), so a
+      // long-running ACP session survives a server WS drop and can be
+      // re-attached by session id after the server relocates to a survivor (M2).
+      const keeper = new SessionKeeper()
 
       const handleRun = (requestId: string, payload: Record<string, unknown>, respond: Channel.Responder): void => {
         const argv = stringArray(payload["argv"])
@@ -213,9 +217,9 @@ const upCommand = Command.make(
           maximumOutputBytes: Executor.defaultLimits.maximumOutputBytes
         }
         const job = Executor.executeStreamed(argv, cwd, limits, respond.chunk)
-        active.set(requestId, job.cancel)
+        keeper.registerRun(requestId, job.cancel)
         void job.done.then((outcome) => {
-          active.delete(requestId)
+          keeper.runDone(requestId)
           Journal.append({
             requestId,
             argv,
@@ -238,18 +242,44 @@ const upCommand = Command.make(
         agentId: string,
         payload: Record<string, unknown>,
         respond: Channel.Responder
-      ): void =>
-        AgentDispatch.handleAgentEvent(requestId, agentId, payload, respond, {
+      ): void => {
+        // Re-attach path: if this exact ACP session is still running here (it
+        // survived a WS drop), just point its output at the new channel and skip
+        // starting a fresh agent — no orphaned agent, work continues live.
+        const resumeId = payload["resume_session_id"]
+        if (typeof resumeId === "string" && resumeId !== "" && keeper.hasSession(resumeId)) {
+          keeper.reattach(resumeId, respond)
+          console.log(`Re-attached live session ${resumeId.slice(0, 8)} to the reconnected channel.`)
+          return
+        }
+
+        // Fresh (or cold-resume) path: route the agent's output through a
+        // swappable sink so a later reconnect can re-attach it, and register the
+        // whole job with the keeper so a WS drop does not kill it.
+        const sink = makeSink(respond)
+        const sinkResponder: Channel.Responder = {
+          chunk: sink.chunk,
+          session: (id) => {
+            sink.session(id)
+            keeper.bindSession(requestId, id)
+          },
+          exit: sink.exit,
+          refused: sink.refused
+        }
+
+        AgentDispatch.handleAgentEvent(requestId, agentId, payload, sinkResponder, {
           config: stored,
           roots,
           journal: Journal.append,
-          registerCancel: (id, cancel) => active.set(id, cancel),
-          unregisterCancel: (id) => active.delete(id)
+          registerCancel: (_id, _cancel) => {},
+          unregisterCancel: (_id) => {},
+          registerAgentJob: (id, job) => keeper.registerAgent(id, job, sink)
         })
+      }
 
       yield* Console.log(`Connecting to ${target} as "${stored.machineName}" (tier ${stored.tier}).`)
 
-      const reason = yield* Effect.promise(() =>
+      const connect = (): Promise<string> =>
         Channel.serve(
           {
             endpoint: target,
@@ -283,21 +313,29 @@ const upCommand = Command.make(
               ),
             onRun: handleRun,
             onAgent: handleAgent,
-            onCancel: (requestId) => {
-              const cancel = active.get(requestId)
-              if (cancel !== undefined) {
-                cancel()
-              }
-            },
-            onClosed: () => {
-              for (const cancel of active.values()) {
-                cancel()
-              }
-              active.clear()
-            }
+            onCancel: (requestId) => keeper.cancel(requestId),
+            onClosed: () => keeper.onDisconnect()
           }
         )
-      )
+
+      // Serve until the connection drops. If live ACP sessions are being kept
+      // (a delegation is mid-flight), reconnect and let the server re-attach to
+      // them by session id instead of exiting and orphaning the agent; with
+      // nothing to keep, exit on the first disconnect exactly as before. Bounded
+      // so a permanently-gone server does not spin forever (kept sessions time
+      // out and empty the keeper, ending the loop).
+      const reason = yield* Effect.promise(async () => {
+        let last = ""
+        for (let attempt = 0; attempt < 600; attempt++) {
+          last = await connect()
+          if (keeper.liveAgentCount() === 0) return last
+          console.log(
+            `Disconnected (${last}); keeping ${keeper.liveAgentCount()} live session(s) — reconnecting…`
+          )
+          await new Promise((resolve) => setTimeout(resolve, 1_000))
+        }
+        return last
+      })
 
       yield* Console.log(`Disconnected (${reason}).`)
     })
